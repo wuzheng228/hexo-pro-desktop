@@ -1,0 +1,47 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- 渐变背景 -->
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0084FF;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#42A5F5;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="hexGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#FFFFFF;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#F0F8FF;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  
+  <!-- 背景圆形 -->
+  <circle cx="256" cy="256" r="240" fill="url(#bgGrad)" stroke="#0056CC" stroke-width="4"/>
+  
+  <!-- 内部装饰圆环 -->
+  <circle cx="256" cy="256" r="200" fill="none" stroke="rgba(255,255,255,0.2)" stroke-width="2"/>
+  
+  <!-- Hexo 六边形 -->
+  <polygon points="256,100 340,150 340,250 256,300 172,250 172,150" 
+           fill="url(#hexGrad)" stroke="#0056CC" stroke-width="3"/>
+  
+  <!-- 内部六边形装饰 -->
+  <polygon points="256,130 310,160 310,230 256,260 202,230 202,160" 
+           fill="none" stroke="#0084FF" stroke-width="2"/>
+  
+  <!-- 中心 "H" 字母 -->
+  <g fill="#0084FF" font-family="Arial, sans-serif" font-weight="bold" font-size="48">
+    <text x="256" y="210" text-anchor="middle" dominant-baseline="middle">H</text>
+  </g>
+  
+  <!-- 底部文档图标 -->
+  <rect x="200" y="320" width="112" height="140" rx="12" 
+        fill="white" stroke="#0084FF" stroke-width="3"/>
+  
+  <!-- 文档内容线条 -->
+  <rect x="220" y="350" width="72" height="6" rx="3" fill="#0084FF"/>
+  <rect x="220" y="365" width="72" height="6" rx="3" fill="#42A5F5"/>
+  <rect x="220" y="380" width="50" height="6" rx="3" fill="#42A5F5"/>
+  <rect x="220" y="395" width="60" height="6" rx="3" fill="#42A5F5"/>
+  
+  <!-- 右上角 Pro 标记 -->
+  <circle cx="400" cy="112" r="45" fill="#FF6B35"/>
+  <text x="400" y="120" text-anchor="middle" dominant-baseline="middle" 
+        fill="white" font-family="Arial, sans-serif" font-weight="bold" font-size="20">PRO</text>
+</svg>

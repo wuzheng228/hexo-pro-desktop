@@ -1,0 +1,106 @@
+{
+  "name": "hexo-pro-desktop",
+  "version": "1.0.0",
+  "description": "Hexo Pro 桌面客户端 - 一个基于 Electron 的 Hexo 博客管理工具",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "dev:react": "echo '开发模式下直接使用已构建的前端资源'",
+    "build": "yarn copy-core && yarn build:react && yarn build:electron",
+    "build:react": "echo '前端资源由父项目构建，跳过此步骤'",
+    "build:electron": "electron-builder",
+    "dist": "yarn build && electron-builder --publish=never",
+    "pack": "electron-builder --dir",
+    "copy-core": "node scripts/copy-hexo-pro.js",
+    "postinstall": "electron-builder install-app-deps",
+    "clean": "rimraf dist src/main/hexo-pro-core",
+    "setup": "yarn install && yarn copy-core",
+    "generate-icons": "node scripts/generate-icon.js",
+    "create-test-icons": "node scripts/create-placeholder-icon.js",
+    "create-working-icons": "node scripts/create-simple-icon.js",
+    "setup-icons": "yarn generate-icons && yarn create-working-icons"
+  },
+  "keywords": [
+    "hexo",
+    "blog",
+    "desktop",
+    "electron",
+    "management"
+  ],
+  "author": "wuzheng",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1",
+    "rimraf": "^5.0.0"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "bcrypt-nodejs": "^0.0.3",
+    "body-parser": "^1.20.2",
+    "browser-sync": "^3.0.4",
+    "cheerio": "^1.0.0",
+    "circular-json": "^0.5.9",
+    "connect-history-api-fallback": "^2.0.0",
+    "electron-store": "^10.0.0",
+    "express": "^4.18.2",
+    "express-jwt": "^8.4.1",
+    "extend": "^3.0.2",
+    "flatted": "^3.2.7",
+    "fs-extra": "^11.1.1",
+    "fuse.js": "^7.0.0",
+    "hexo": "^7.3.0",
+    "hexo-deployer-git": "^4.0.0",
+    "hexo-front-matter": "^4.1.0",
+    "hexo-fs": "^4.1.1",
+    "hexo-util": "^3.1.0",
+    "js-yaml": "^4.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "lodash": "^4.17.21",
+    "mime": "^3.0.0",
+    "multer": "^1.4.5-lts.2",
+    "nedb": "^1.8.0",
+    "node-fetch": "^3.3.2",
+    "serve-static": "^1.15.0",
+    "uuid": "^10.0.0"
+  },
+  "build": {
+    "appId": "com.hexo-pro.desktop",
+    "productName": "Hexo Pro Desktop",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}",
+      "!**/node_modules/*/{test,__tests__,tests,powered-test,example,examples}",
+      "!**/node_modules/*.d.ts",
+      "!**/node_modules/.bin",
+      "!**/*.{iml,o,hprof,orig,pyc,pyo,rbc,swp,csproj,sln,xproj}",
+      "!.editorconfig",
+      "!**/._*",
+      "!**/{.DS_Store,.git,.hg,.svn,CVS,RCS,SCCS,.gitignore,.gitattributes}",
+      "!**/{__pycache__,thumbs.db,.flowconfig,.idea,.vs,.nyc_output}",
+      "!**/{appveyor.yml,.travis.yml,circle.yml}",
+      "!**/{npm-debug.log,yarn.lock,.yarn-integrity,.yarn-metadata.json}"
+    ],
+    "mac": {
+      "icon": "assets/icon.icns",
+      "category": "public.app-category.productivity"
+    },
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": "nsis"
+    },
+    "linux": {
+      "icon": "assets/icon.png",
+      "target": "AppImage"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

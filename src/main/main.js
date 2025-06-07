@@ -19,9 +19,12 @@ try {
 // 对于Node.js < 18版本，需要安装node-fetch
 const fetch = (() => {
   try {
-    return require('node-fetch');
-  } catch {
+    const nodeFetch = require('node-fetch');
+    console.log('[Desktop]: 使用 node-fetch 库');
+    return nodeFetch;
+  } catch (error) {
     // Node.js 18+ 内置fetch
+    console.log('[Desktop]: 使用内置 fetch API');
     return globalThis.fetch;
   }
 })();
@@ -39,28 +42,28 @@ class HexoProDesktop {
     this.currentProjectPath = null;
     this.isDev = process.env.NODE_ENV === 'development';
     this.authManager = new AuthManager();
-    
+
     // 添加状态管理，防止循环重定向
     this.isLoadingWebInterface = false;
     this.lastTokenInjected = null;
     this.pageLoadCount = 0;
     this.tokenInjectionAttempts = 0;
     this.maxTokenInjectionAttempts = 2;
-    
+
     // 添加token验证缓存
     this.lastValidatedToken = null;
     this.lastValidationSuccess = false;
-    
+
     // 添加窗口状态管理
     this.windowHidden = false;
     this.lastWindowState = null; // 用于保存窗口关闭前的状态
-    
+
     // 添加项目加载状态管理
     this.isProjectLoading = false;
-    
+
     // 设置全局变量，供HexoProServer访问
     global.desktopAuthManager = this.authManager;
-    
+
     // 等待 app ready 后初始化
     app.whenReady().then(async () => {
       await this.initializeStore();
@@ -74,7 +77,7 @@ class HexoProDesktop {
     if (process.platform !== 'win32') {
       return {};
     }
-    
+
     return {
       env: {
         ...process.env,
@@ -95,7 +98,7 @@ class HexoProDesktop {
 
   processWindowsOutput(data) {
     let output = data.toString('utf8');
-    
+
     if (process.platform === 'win32' && iconv) {
       try {
         // 更智能的编码检测
@@ -103,7 +106,7 @@ class HexoProDesktop {
         if (/[\u4e00-\u9fa5]/.test(output)) {
           return output;
         }
-        
+
         // 2. 如果包含非ASCII字符但没有中文，可能是GBK编码
         if (/[^\x00-\x7F]/.test(output)) {
           // 尝试用GBK解码
@@ -117,7 +120,7 @@ class HexoProDesktop {
         console.warn('[编码处理]: 编码转换失败，使用原始输出', e.message);
       }
     }
-    
+
     return output;
   }
 
@@ -125,26 +128,26 @@ class HexoProDesktop {
     try {
       console.log('应用名称:', app.getName());
       console.log('用户数据路径:', app.getPath('userData'));
-      
+
       const electronStore = await import('electron-store');
       Store = electronStore.default;
       store = new Store();
       console.log('electron-store 初始化成功');
       console.log('store存储路径:', store.path);
-      
+
       // 将store实例传递给AuthManager
       this.authManager.setStore(store);
-      
+
     } catch (error) {
       console.error('初始化 electron-store 失败:', error);
       // 提供一个简单的内存存储作为后备
       store = {
         get: () => null,
-        set: () => {},
-        delete: () => {},
-        clear: () => {}
+        set: () => { },
+        delete: () => { },
+        clear: () => { }
       };
-      
+
       // 也要设置给AuthManager
       this.authManager.setStore(store);
     }
@@ -201,7 +204,7 @@ class HexoProDesktop {
       // 如果是在主页面内的导航（非登录页），减少拦截器重新注入的频率
       if (navigationUrl.includes('/pro') && !navigationUrl.includes('/pro')) {
         console.log('[Desktop]: 主页面内导航，检查拦截器是否需要重新注入');
-        
+
         // 检查拦截器是否还存在
         this.mainWindow.webContents.executeJavaScript(`
           (function() {
@@ -229,23 +232,23 @@ class HexoProDesktop {
         }).catch((error) => {
           console.error('[Desktop]: 检查拦截器状态失败:', error);
         });
-        
+
         return; // 跳过默认的注入逻辑
       }
-      
+
       // 添加防抖，避免过度触发
       if (this.navigationTimeout) {
         clearTimeout(this.navigationTimeout);
       }
-      
+
       this.navigationTimeout = setTimeout(async () => {
         try {
           console.log('[Desktop]: 页面内导航后检查并重新注入拦截器...');
-          
+
           // 只注入拦截器和桌面功能，不重新处理token
           await this.injectLocalStorageInterceptor();
           await this.injectDesktopFeatures();
-          
+
           console.log('[Desktop]: 页面内导航后拦截器检查完成');
         } catch (error) {
           console.error('[Desktop]: 页面内导航后注入拦截器失败:', error);
@@ -254,10 +257,10 @@ class HexoProDesktop {
     });
 
     // 暂时不启动服务器，等检查项目后再决定
-    
+
     // 加载桌面端专用的前端界面
     const indexPath = path.join(__dirname, '../renderer/index.html');
-    
+
     if (this.isDev) {
       // 开发环境：加载本地文件并打开开发者工具
       await this.mainWindow.loadFile(indexPath);
@@ -273,17 +276,17 @@ class HexoProDesktop {
       this.mainWindow.on('close', (event) => {
         if (!app.isQuittingApp) {
           event.preventDefault();
-          
+
           // 保存当前窗口状态（URL、项目路径等）
           this.saveWindowState();
-          
+
           this.mainWindow.hide();
           this.windowHidden = true;
-          
+
           console.log('[Desktop]: 窗口已隐藏到程序坞，状态已保存');
         }
       });
-      
+
       // 只有在应用真正退出时才清理
       this.mainWindow.on('closed', () => {
         this.mainWindow = null;
@@ -326,7 +329,7 @@ class HexoProDesktop {
       }
 
       console.log('[Desktop]: 恢复窗口状态:', this.lastWindowState);
-      
+
       // 检查状态是否过期（超过10分钟认为过期）
       const stateAge = Date.now() - this.lastWindowState.timestamp;
       if (stateAge > 10 * 60 * 1000) {
@@ -389,8 +392,8 @@ class HexoProDesktop {
     }
 
     // 不能以连字符或下划线开头或结尾
-    if (projectName.startsWith('-') || projectName.startsWith('_') || 
-        projectName.endsWith('-') || projectName.endsWith('_')) {
+    if (projectName.startsWith('-') || projectName.startsWith('_') ||
+      projectName.endsWith('-') || projectName.endsWith('_')) {
       return {
         isValid: false,
         message: '项目名称不能以连字符(-)或下划线(_)开头或结尾'
@@ -469,7 +472,7 @@ class HexoProDesktop {
   async executeCommand(command, workingDir, progressCallback) {
     return new Promise((resolve, reject) => {
       console.log(`[命令执行]: 在 ${workingDir} 执行: ${command}`);
-      
+
       const actualCommand = this.wrapWindowsCommand(command);
       const spawnOptions = {
         cwd: workingDir,
@@ -481,7 +484,7 @@ class HexoProDesktop {
           windowsHide: true
         })
       };
-      
+
       const child = spawn(actualCommand, [], spawnOptions);
 
       let stdout = '';
@@ -523,7 +526,7 @@ class HexoProDesktop {
 
   createMenu() {
     const isProjectLoading = this.isProjectLoading; // 获取当前加载状态
-    
+
     const template = [
       {
         label: '文件',
@@ -665,7 +668,7 @@ class HexoProDesktop {
       // 1. 检查系统依赖
       console.log('[创建项目]: 检查系统依赖...');
       const dependencies = await this.checkSystemDependencies();
-      
+
       if (!dependencies.npm || !dependencies.hexoCli) {
         const missingDeps = dependencies.errors.join('\n');
         const result = await dialog.showMessageBox(this.mainWindow, {
@@ -706,7 +709,7 @@ class HexoProDesktop {
       // 3. 输入项目名称
       console.log('[创建项目]: 请求项目名称输入...');
       const projectNameResult = await this.showProjectNameDialog();
-      
+
       if (!projectNameResult.success) {
         console.log('[创建项目]: 用户取消项目名称输入');
         return;
@@ -1183,17 +1186,17 @@ class HexoProDesktop {
 
     if (!result.canceled && result.filePaths.length > 0) {
       const projectPath = result.filePaths[0];
-      
+
       // 验证是否是有效的 Hexo 项目
       const validation = await this.validateHexoProject(projectPath);
       if (!validation.isValid) {
         dialog.showErrorBox('无效的 Hexo 项目', validation.message);
         return;
       }
-      
+
       // 显示加载窗口并加载项目
       this.showProjectLoadingWindow(projectPath);
-      
+
       try {
         await this.loadProject(projectPath);
       } catch (error) {
@@ -1209,13 +1212,13 @@ class HexoProDesktop {
   async validateHexoProject(projectPath) {
     try {
       console.log('验证 Hexo 项目:', projectPath);
-      
+
       // 检查基本文件和目录
       const configPath = path.join(projectPath, '_config.yml');
       const packagePath = path.join(projectPath, 'package.json');
       const sourcePath = path.join(projectPath, 'source');
       const themesPath = path.join(projectPath, 'themes');
-      
+
       // 检查 _config.yml 是否存在
       if (!await fs.pathExists(configPath)) {
         return {
@@ -1223,7 +1226,7 @@ class HexoProDesktop {
           message: '该目录不是有效的 Hexo 项目：缺少 _config.yml 配置文件'
         };
       }
-      
+
       // 检查 package.json 是否存在
       if (!await fs.pathExists(packagePath)) {
         return {
@@ -1231,7 +1234,7 @@ class HexoProDesktop {
           message: '该目录不是有效的 Hexo 项目：缺少 package.json 文件'
         };
       }
-      
+
       // 检查 source 目录是否存在
       if (!await fs.pathExists(sourcePath)) {
         return {
@@ -1239,12 +1242,12 @@ class HexoProDesktop {
           message: '该目录不是有效的 Hexo 项目：缺少 source 目录'
         };
       }
-      
+
       // 检查 package.json 中是否包含 hexo 依赖
       try {
         const packageJson = await fs.readJson(packagePath);
         const dependencies = { ...packageJson.dependencies, ...packageJson.devDependencies };
-        
+
         if (!dependencies.hexo) {
           return {
             isValid: false,
@@ -1257,11 +1260,11 @@ class HexoProDesktop {
           message: '该目录不是有效的 Hexo 项目：package.json 文件格式错误'
         };
       }
-      
+
       // 检查 _config.yml 的基本格式
       try {
         const configContent = await fs.readFile(configPath, 'utf8');
-        
+
         // 基本检查是否包含 Hexo 项目的关键配置
         if (!configContent.includes('title:') || !configContent.includes('url:')) {
           console.warn('_config.yml 可能格式不完整，但继续加载');
@@ -1272,13 +1275,13 @@ class HexoProDesktop {
           message: '该目录不是有效的 Hexo 项目：_config.yml 文件无法读取'
         };
       }
-      
+
       console.log('Hexo 项目验证通过:', projectPath);
       return {
         isValid: true,
         message: 'Hexo 项目验证通过'
       };
-      
+
     } catch (error) {
       console.error('验证 Hexo 项目时出错:', error);
       return {
@@ -1291,11 +1294,11 @@ class HexoProDesktop {
   async loadProject(projectPath) {
     try {
       console.log('准备加载项目:', projectPath);
-      
+
       // 设置加载状态
       this.isProjectLoading = true;
       this.updateMenuState(); // 更新菜单状态
-      
+
       // 步骤1: 验证项目
       this.updateLoadingStep(1, false);
       const validation = await this.validateHexoProject(projectPath);
@@ -1306,24 +1309,24 @@ class HexoProDesktop {
         throw new Error(errorMessage);
       }
       this.updateLoadingStep(1, true);
-      
+
       console.log('Hexo 项目验证通过，继续加载');
-      
+
       // 重置状态，防止之前的状态影响新项目
       this.isLoadingWebInterface = false;
       this.lastTokenInjected = null;
       this.pageLoadCount = 0;
       this.tokenInjectionAttempts = 0;
-      
+
       // 重置token验证缓存
       this.lastValidatedToken = null;
       this.lastValidationSuccess = false;
-      
+
       if (this.navigationTimeout) {
         clearTimeout(this.navigationTimeout);
         this.navigationTimeout = null;
       }
-      
+
       // 检查是否是同一个项目，如果是且服务器正在运行，则不需要重启
       if (this.currentProjectPath === projectPath && this.hexoServer) {
         try {
@@ -1336,19 +1339,19 @@ class HexoProDesktop {
             await this.loadWebInterface();
             this.updateLoadingStep(4, true);
             console.log('1022web界面加载完成了返回数据');
-            
+
             // 隐藏加载窗口
             this.hideProjectLoadingWindow();
             this.isProjectLoading = false;
             this.updateMenuState(); // 更新菜单状态
-            
+
             return { url: serverUrl, port: this.hexoServer.getPort() };
           }
         } catch (error) {
           console.log('服务器状态检查失败，需要重启:', error.message);
         }
       }
-      
+
       // 步骤2: 停止现有服务器
       this.updateLoadingStep(2, false);
       if (this.hexoServer) {
@@ -1364,19 +1367,19 @@ class HexoProDesktop {
         }
       }
       this.updateLoadingStep(2, true);
-      
+
       this.currentProjectPath = projectPath;
-      
+
       // 步骤3: 启动新服务器
       this.updateLoadingStep(3, false);
       console.log('创建新的服务器实例...');
       this.hexoServer = new HexoProServer(projectPath);
-      
+
       // 尝试启动服务器，包含重试机制
       let serverInfo;
       let attempts = 0;
       const maxAttempts = 3;
-      
+
       while (attempts < maxAttempts) {
         try {
           console.log(`尝试启动服务器 (${attempts + 1}/${maxAttempts})...`);
@@ -1386,19 +1389,19 @@ class HexoProDesktop {
         } catch (error) {
           attempts++;
           console.error(`服务器启动失败 (尝试 ${attempts}/${maxAttempts}):`, error);
-          
+
           if (attempts < maxAttempts) {
             // 如果是端口占用错误，等待更长时间
             if (error.message.includes('EADDRINUSE') || error.code === 'EADDRINUSE') {
               console.log('端口被占用，等待端口释放...');
               await new Promise(resolve => setTimeout(resolve, 3000));
-              
+
               // 尝试强制清理
               if (this.hexoServer) {
                 await this.hexoServer.forceStop();
                 await new Promise(resolve => setTimeout(resolve, 1000));
               }
-              
+
               // 重新创建服务器实例
               this.hexoServer = new HexoProServer(projectPath);
             } else {
@@ -1409,30 +1412,30 @@ class HexoProDesktop {
           }
         }
       }
-      
+
       if (!serverInfo) {
         throw new Error('服务器启动失败，已达到最大重试次数');
       }
       this.updateLoadingStep(3, true);
-      
+
       // 保存项目路径
       this.safeStoreSet('lastProjectPath', projectPath);
-      
+
       // 等待服务器完全启动
       await this.waitForServer(serverInfo.url);
-      
+
       // 步骤4: 加载Web界面
       this.updateLoadingStep(4, false);
       console.log('[Desktop]: 即将调用loadWebInterface方法...');
       await this.loadWebInterface();
       console.log('[Desktop]: loadWebInterface方法调用完成');
       this.updateLoadingStep(4, true);
-      
+
       // 隐藏加载窗口
       this.hideProjectLoadingWindow();
       this.isProjectLoading = false;
       this.updateMenuState(); // 更新菜单状态
-      
+
       console.log('1100web界面加载完成了返回数据');
       // 通知渲染进程项目已加载（如果当前在主页）
       if (this.mainWindow) {
@@ -1467,12 +1470,12 @@ class HexoProDesktop {
       return serverInfo;
     } catch (error) {
       console.error('加载项目失败:', error);
-      
+
       // 隐藏加载窗口
       this.hideProjectLoadingWindow();
       this.isProjectLoading = false;
       this.updateMenuState(); // 更新菜单状态
-      
+
       // 清理失败的服务器实例
       if (this.hexoServer) {
         try {
@@ -1482,34 +1485,144 @@ class HexoProDesktop {
         }
         this.hexoServer = null;
       }
-      
+
       // 显示错误对话框
-      const errorMessage = error.message.includes('EADDRINUSE') 
+      const errorMessage = error.message.includes('EADDRINUSE')
         ? '端口被占用，请稍后重试或重启应用程序'
         : `加载项目失败: ${error.message}`;
-        
+
       dialog.showErrorBox('错误', errorMessage);
       throw error;
     }
   }
 
-  async waitForServer(serverUrl, maxAttempts = 10) {
+  async waitForServer(serverUrl, maxAttempts = 20) {
+    console.log(`[waitForServer]: 开始检查服务器状态: ${serverUrl}`);
+    console.log(`[waitForServer]: 平台: ${process.platform}, 最大尝试次数: ${maxAttempts}`);
+
+    // Windows系统需要更长的等待时间
+    const isWindows = process.platform === 'win32';
+    const baseDelay = isWindows ? 1000 : 500; // Windows使用1秒间隔
+
+    // 准备备用URL（处理localhost vs 127.0.0.1的问题）
+    const alternativeUrl = serverUrl.includes('localhost')
+      ? serverUrl.replace('localhost', '127.0.0.1')
+      : serverUrl.replace('127.0.0.1', 'localhost');
+
     for (let i = 0; i < maxAttempts; i++) {
-      try {
-        const response = await fetch(`${serverUrl}/hexopro/api/desktop/status`);
-        if (response.ok) {
-          return true;
-        }
-      } catch (error) {
-        // 服务器还未就绪，继续等待
-        console.log('服务器还未就绪，继续等待')
+      // 要尝试的URL列表（主要URL和备用URL）
+      const urlsToTry = [serverUrl];
+
+      // 在Windows上，如果主URL包含localhost，也尝试127.0.0.1
+      if (isWindows && serverUrl.includes('localhost')) {
+        urlsToTry.push(alternativeUrl);
       }
-      
-      // 等待500ms后重试
-      await new Promise(resolve => setTimeout(resolve, 500));
+
+      let lastError = null;
+
+      for (const urlToTry of urlsToTry) {
+        try {
+          console.log(`[waitForServer]: 尝试 ${i + 1}/${maxAttempts} - 检查: ${urlToTry}/hexopro/api/desktop/status`);
+
+          // 为Windows添加更宽松的请求选项
+          const fetchOptions = {
+            method: 'GET',
+            headers: {
+              'Accept': 'application/json',
+              'Cache-Control': 'no-cache'
+            },
+            // Windows上增加超时时间
+            signal: AbortSignal.timeout(isWindows ? 8000 : 5000)
+          };
+
+          const response = await fetch(`${urlToTry}/hexopro/api/desktop/status`, fetchOptions);
+          console.log(`[waitForServer]: 响应状态: ${response.status}, ok: ${response.ok}`);
+
+          if (response.ok) {
+            const data = await response.json();
+            console.log(`[waitForServer]: 服务器响应数据:`, data);
+            console.log(`[waitForServer]: 服务器检查成功，用时: ${(i + 1) * baseDelay}ms`);
+
+            // 如果使用备用URL成功，记录一下
+            if (urlToTry !== serverUrl) {
+              console.log(`[waitForServer]: 注意：主URL ${serverUrl} 失败，使用备用URL ${urlToTry} 成功`);
+            }
+
+            return true;
+          } else {
+            console.log(`[waitForServer]: 服务器响应非200状态: ${response.status}`);
+            lastError = new Error(`HTTP ${response.status}`);
+          }
+        } catch (error) {
+          const errorType = error.name || 'Unknown';
+          const errorMessage = error.message || 'Unknown error';
+
+          console.log(`[waitForServer]: URL ${urlToTry} 尝试失败 - ${errorType}: ${errorMessage}`);
+          lastError = error;
+
+          // 在Windows上，某些网络错误是正常的，需要更多耐心
+          if (isWindows) {
+            if (error.name === 'ConnectTimeoutError' ||
+              error.name === 'FetchError' ||
+              error.message.includes('ECONNREFUSED') ||
+              error.message.includes('fetch')) {
+              console.log(`[waitForServer]: Windows网络连接错误，尝试下一个URL或继续等待...`);
+            }
+          }
+        }
+      }
+
+      // 如果所有URL都失败了，记录最后的错误
+      if (lastError) {
+        console.log(`[waitForServer]: 尝试 ${i + 1} 所有URL都失败，最后错误: ${lastError.message}`);
+      }
+
+      // 动态调整等待时间 - Windows上前几次尝试等待更久
+      let waitTime = baseDelay;
+      if (isWindows && i < 5) {
+        waitTime = 2000; // 前5次尝试等待2秒
+      }
+
+      console.log(`[waitForServer]: 等待 ${waitTime}ms 后重试...`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
     }
-    
-    throw new Error('服务器启动超时');
+
+    const totalWaitTime = maxAttempts * baseDelay / 1000;
+    const errorMsg = `服务器启动超时 - 等待了 ${totalWaitTime} 秒仍无响应`;
+    console.error(`[waitForServer]: ${errorMsg}`);
+
+    // 在抛出错误前，尝试最后一次直接的网络检查
+    if (isWindows) {
+      try {
+        console.log(`[waitForServer]: Windows最后尝试 - 简单的网络连接测试`);
+
+        // 尝试主URL和备用URL
+        const urlsToCheck = [serverUrl];
+        if (serverUrl.includes('localhost')) {
+          urlsToCheck.push(alternativeUrl);
+        }
+
+        for (const checkUrl of urlsToCheck) {
+          try {
+            console.log(`[waitForServer]: 最后检查URL: ${checkUrl}`);
+            const finalCheck = await fetch(checkUrl, {
+              method: 'HEAD',
+              signal: AbortSignal.timeout(3000)
+            });
+            if (finalCheck.ok || finalCheck.status === 404) {
+              console.log(`[waitForServer]: 最后检查发现服务器实际可达，可能是路由问题`);
+              return true;
+            }
+          } catch (urlError) {
+            console.log(`[waitForServer]: 最后检查URL ${checkUrl} 失败:`, urlError.message);
+          }
+        }
+      } catch (finalError) {
+        console.log(`[waitForServer]: 最后检查失败:`, finalError.message);
+      }
+    }
+
+    throw new Error(errorMsg);
   }
 
   openSettings() {
@@ -1566,7 +1679,7 @@ class HexoProDesktop {
     // 当所有窗口关闭时退出应用（macOS 除外）
     app.on('window-all-closed', async () => {
       // await this.cleanup();
-      
+
       if (process.platform !== 'darwin') {
         app.quit();
       }
@@ -1581,15 +1694,15 @@ class HexoProDesktop {
             console.log('[Desktop]: 从程序坞恢复应用，显示现有窗口');
             this.mainWindow.show();
             this.windowHidden = false;
-            
+
             // 尝试恢复到之前的状态
             const restored = await this.restoreWindowState();
             if (!restored) {
               console.log('[Desktop]: 无法恢复之前状态，检查是否有上次的项目');
               // 如果无法恢复状态，检查是否有项目需要加载
               const lastProjectPath = this.safeStoreGet('lastProjectPath');
-              if (lastProjectPath && await fs.pathExists(lastProjectPath) && 
-                  this.currentProjectPath !== lastProjectPath) {
+              if (lastProjectPath && await fs.pathExists(lastProjectPath) &&
+                this.currentProjectPath !== lastProjectPath) {
                 await this.loadProject(lastProjectPath);
               }
             }
@@ -1603,7 +1716,7 @@ class HexoProDesktop {
           console.log('[Desktop]: 窗口不存在，创建新窗口');
           await this.createWindow();
           this.createMenu();
-          
+
           // 检查是否有上次打开的项目
           const lastProjectPath = this.safeStoreGet('lastProjectPath');
           if (lastProjectPath && await fs.pathExists(lastProjectPath)) {
@@ -1631,7 +1744,7 @@ class HexoProDesktop {
     app.on('before-quit', async (event) => {
       // 标记应用正在退出，这样close事件就不会阻止退出
       app.isQuittingApp = true;
-      
+
       event.preventDefault();
       await this.cleanup();
       app.exit(0);
@@ -1645,28 +1758,28 @@ class HexoProDesktop {
   async cleanup() {
     try {
       console.log('开始清理资源...');
-      
+
       // 设置加载状态为false
       this.isProjectLoading = false;
-      
+
       // 清理加载窗口
       this.hideProjectLoadingWindow();
-      
+
       // 清理导航相关的状态
       this.isLoadingWebInterface = false;
       this.lastTokenInjected = null;
       this.pageLoadCount = 0;
       this.tokenInjectionAttempts = 0;
-      
+
       // 清理token验证缓存
       this.lastValidatedToken = null;
       this.lastValidationSuccess = false;
-      
+
       if (this.navigationTimeout) {
         clearTimeout(this.navigationTimeout);
         this.navigationTimeout = null;
       }
-      
+
       // 停止服务器
       if (this.hexoServer) {
         console.log('正在停止服务器...');
@@ -1684,7 +1797,7 @@ class HexoProDesktop {
         }
         this.hexoServer = null;
       }
-      
+
       console.log('资源清理完成');
     } catch (error) {
       console.error('资源清理失败:', error);
@@ -1766,14 +1879,14 @@ class HexoProDesktop {
         console.log('[IPC]: 项目正在加载中，跳过Web界面加载请求');
         return false;
       }
-      
+
       if (this.hexoServer && this.currentProjectPath) {
         // 避免重复调用
         if (this.isLoadingWebInterface) {
           console.log('[IPC]: 已有Web界面加载流程在进行，跳过IPC调用');
           return false;
         }
-        
+
         await this.loadWebInterface();
         console.log('1406web界面加载完成了返回数据');
         return true;
@@ -1802,16 +1915,16 @@ class HexoProDesktop {
         console.log('[关闭项目]: 项目正在加载中，忽略关闭操作');
         return;
       }
-      
+
       // 设置加载状态
       this.isProjectLoading = true;
       this.updateMenuState(); // 更新菜单状态
-      
+
       // 显示关闭项目的加载窗口
       this.showProjectClosingWindow();
-      
+
       console.log('正在关闭当前项目...');
-      
+
       // 步骤1: 停止当前的 Hexo Pro 服务器
       this.updateLoadingStep(1, false);
       if (this.hexoServer) {
@@ -1835,10 +1948,10 @@ class HexoProDesktop {
       this.updateLoadingStep(2, false);
       console.log('启动静态服务器...');
       this.hexoServer = new HexoProServer(null);
-      
+
       let attempts = 0;
       const maxAttempts = 3;
-      
+
       while (attempts < maxAttempts) {
         try {
           await this.hexoServer.startStaticServer();
@@ -1847,12 +1960,12 @@ class HexoProDesktop {
         } catch (error) {
           attempts++;
           console.error(`静态服务器启动失败 (尝试 ${attempts}/${maxAttempts}):`, error);
-          
+
           if (attempts < maxAttempts) {
             if (error.message.includes('EADDRINUSE') || error.code === 'EADDRINUSE') {
               console.log('端口被占用，等待端口释放...');
               await new Promise(resolve => setTimeout(resolve, 2000));
-              
+
               // 强制清理后重新创建实例
               if (this.hexoServer) {
                 await this.hexoServer.forceStop();
@@ -1873,7 +1986,7 @@ class HexoProDesktop {
       this.updateLoadingStep(3, false);
       await this.returnToHome();
       this.updateLoadingStep(3, true);
-      
+
       // 隐藏加载窗口并更新状态
       this.hideProjectLoadingWindow();
       this.isProjectLoading = false;
@@ -1881,12 +1994,12 @@ class HexoProDesktop {
 
     } catch (error) {
       console.error('关闭项目失败:', error);
-      
+
       // 隐藏加载窗口
       this.hideProjectLoadingWindow();
       this.isProjectLoading = false;
       this.updateMenuState(); // 更新菜单状态
-      
+
       // 错误处理：强制清理并显示错误
       if (this.hexoServer) {
         try {
@@ -1895,11 +2008,11 @@ class HexoProDesktop {
           console.error('清理失败的服务器时出错:', cleanupError);
         }
       }
-      
+
       const errorMessage = error.message.includes('EADDRINUSE')
         ? '端口被占用，请重启应用程序'
         : `关闭项目失败: ${error.message}`;
-        
+
       dialog.showErrorBox('错误', errorMessage);
     }
   }
@@ -1909,7 +2022,7 @@ class HexoProDesktop {
       // 加载桌面端专用的前端界面
       const indexPath = path.join(__dirname, '../renderer/index.html');
       await this.mainWindow.loadFile(indexPath);
-      
+
       console.log('已返回主页界面');
     } catch (error) {
       console.error('返回主页失败:', error);
@@ -1920,25 +2033,25 @@ class HexoProDesktop {
   async loadWebInterface() {
     try {
       console.log('[Desktop]: 开始加载Web界面...');
-      
+
       // 防止并发调用和循环重定向
       if (this.isLoadingWebInterface) {
         console.log('[Desktop]: 已有Web界面加载流程在进行，跳过重复调用');
         return;
       }
-      
+
       this.isLoadingWebInterface = true;
       this.pageLoadCount++;
-      
+
       console.log('', this.pageLoadCount);
-      
+
       // 如果页面加载次数过多，说明可能陷入了循环
       if (this.pageLoadCount > 3) {
         console.warn('[Desktop]: 页面加载次数过多，可能陷入循环，停止自动刷新');
         this.isLoadingWebInterface = false;
         return;
       }
-      
+
       if (!this.mainWindow) throw new Error('主窗口不存在');
       if (!this.hexoServer) throw new Error('服务器未启动');
 
@@ -1958,7 +2071,7 @@ class HexoProDesktop {
 
       // 2. 确定目标URL - 只有在token确实有效的情况下才跳转到主页
       let webUrl;
-      let  needsNavigation = false;
+      let needsNavigation = false;
       console.log('tokenInjectionAttempts', this.tokenInjectionAttempts, this.maxTokenInjectionAttempts);
       if (validToken && validToken !== this.lastTokenInjected && this.tokenInjectionAttempts < this.maxTokenInjectionAttempts) {
         // 有有效token，先尝试注入，如果注入成功再跳转到主页
@@ -1967,7 +2080,7 @@ class HexoProDesktop {
       } else {
         // 如果 token 无效或不存在，或者注入次数过多，都跳转到登录页，并明确告知原因
         const reason = validToken ? 'token_injection_failed' : 'token_invalid_or_missing';
-        webUrl = `${this.hexoServer.getUrl()}/pro/login?reason=${reason}`; 
+        webUrl = `${this.hexoServer.getUrl()}/pro/login?reason=${reason}`;
         console.log(`[Desktop]: 没有有效token或注入失败，跳转到登录页 (reason: ${reason}):`, webUrl);
         needsNavigation = true;
       }
@@ -1975,8 +2088,8 @@ class HexoProDesktop {
       // 3. 如果当前页面已经在正确的URL，就不需要重新加载
       const currentUrl = this.mainWindow.webContents.getURL();
       console.log('currentUrl:', currentUrl);
-  
-      
+
+
       if (needsNavigation) {
         console.log('[Desktop]: 步骤2: 需要导航到Web界面，当前URL:', currentUrl);
         await this.mainWindow.loadURL(webUrl);//  这里会触发 did-navigate-in-page 事件
@@ -1991,7 +2104,7 @@ class HexoProDesktop {
                 resolve();
               }
             };
-            
+
             // 添加超时机制
             const timeout = setTimeout(() => {
               if (!pageLoadResolved) {
@@ -2000,7 +2113,7 @@ class HexoProDesktop {
                 resolve();
               }
             }, 10000); // 10秒超时
-        
+
             this.mainWindow.webContents.once('did-finish-load', () => {
               console.log('[Desktop]: did-finish-load事件触发');
               clearTimeout(timeout);
@@ -2022,9 +2135,9 @@ class HexoProDesktop {
       } else {
         console.log('[Desktop]: 步骤2: 当前已在Web界面，无需重新导航，当前URL:', currentUrl);
       }
-      
+
       // 等待一小段时间，确保拦截器有足够时间初始化
-      await new Promise(resolve => setTimeout(resolve, 300)); 
+      await new Promise(resolve => setTimeout(resolve, 300));
 
       // 5. 如果有有效token且之前没有注入过相同的token，才注入
       console.log('validToken:', validToken, this.lastTokenInjected, this.tokenInjectionAttempts, this.maxTokenInjectionAttempts);
@@ -2032,13 +2145,13 @@ class HexoProDesktop {
       if (validToken && validToken !== this.lastTokenInjected && this.tokenInjectionAttempts < this.maxTokenInjectionAttempts) {
         console.log('[Desktop]: 步骤4: 发现有效且新的token，尝试注入...');
         this.tokenInjectionAttempts++;
-        
+
         const tokenInjectedSuccessfully = await this.injectToken(validToken);
-        
+
         if (tokenInjectedSuccessfully) {
           console.log('[Desktop]: Token注入成功，记录已注入的token');
           this.lastTokenInjected = validToken;
-          
+
           // 不再自动跳转到主页，让前端来处理token验证和页面跳转
           console.log('[Desktop]: Token注入成功，等待前端处理token验证和页面跳转');
           await this.mainWindow.webContents.loadURL(webUrl);
@@ -2052,11 +2165,11 @@ class HexoProDesktop {
       } else {
         console.log('[Desktop]: 步骤4: 没有有效token，用户需要手动登录');
       }
-      
+
       // 6. 注入桌面端功能
       console.log('[Desktop]: 步骤5: 注入桌面端功能...');
       await this.injectDesktopFeatures(); // 添加桌面端元素标记、以及桌面端的博文链接跳转功能
-      
+
       console.log('[Desktop]: Web界面加载流程完成。');
 
     } catch (error) {
@@ -2080,36 +2193,36 @@ class HexoProDesktop {
   async prepareAndValidateToken() {
     console.log('[Desktop]: 准备并验证token...');
     console.log('[Desktop]: 当前项目路径:', this.currentProjectPath);
-    
+
     if (!this.currentProjectPath) {
       console.log('[Desktop]: 当前项目路径未设置，无法准备token');
       return null;
     }
-    
+
     const token = this.authManager.getToken(this.currentProjectPath);
     console.log('[Desktop]: 获取到的token:', token ? '存在(长度:' + token.length + ')' : '不存在');
-    
+
     if (!token) {
       console.log('[Desktop]: 没有token，用户需要手动登录');
       return null;
     }
-    
+
     // 如果token和上次验证的相同，且上次验证成功，跳过重复验证
     if (token === this.lastValidatedToken && this.lastValidationSuccess) {
       console.log('[Desktop]: Token与上次验证的相同且上次验证成功，跳过重复验证');
       return token;
     }
-    
+
     // 验证token有效性
     console.log('[Desktop]: 开始验证token有效性...');
     try {
       const serverUrl = this.hexoServer.getUrl();
       const isValid = await this.validateTokenWithServer(serverUrl, token);
-      
+
       // 记录验证结果
       this.lastValidatedToken = token;
       this.lastValidationSuccess = isValid;
-      
+
       if (isValid) {
         console.log('[Desktop]: Token验证成功，可以使用');
         return token;
@@ -2125,11 +2238,11 @@ class HexoProDesktop {
       // 验证出错时，为了安全起见，也清除token
       console.log('[Desktop]: 由于验证出错，清除token以确保安全');
       this.authManager.clearToken(this.currentProjectPath);
-      
+
       // 记录验证失败
       this.lastValidatedToken = token;
       this.lastValidationSuccess = false;
-      
+
       return null;
     }
   }
@@ -2137,7 +2250,7 @@ class HexoProDesktop {
   async validateTokenWithServer(serverUrl, token) {
     try {
       console.log('[Desktop]: 向服务器验证token...');
-      
+
       const response = await fetch(`${serverUrl}/hexopro/api/userInfo`, {
         method: 'GET',
         headers: {
@@ -2146,13 +2259,13 @@ class HexoProDesktop {
         },
         signal: AbortSignal.timeout(3000) // 缩短超时时间到3秒
       });
-      
+
       console.log('[Desktop]: Token验证响应状态:', response.status);
-      
+
       if (response.ok) {
         const data = await response.json();
         console.log('[Desktop]: Token验证响应数据:', data);
-        
+
         // 检查是否返回了有效的用户信息且没有401错误码
         if (data && data.code !== 401) {
           console.log('[Desktop]: Token验证成功');
@@ -2182,12 +2295,12 @@ class HexoProDesktop {
   async prepareTokenInjection() {
     console.log('[Desktop]: 准备token注入数据...');
     console.log('[Desktop]: 当前项目路径:', this.currentProjectPath);
-    
+
     if (!this.currentProjectPath) {
       console.log('[Desktop]: 当前项目路径未设置，无法准备token');
       return null;
     }
-    
+
     // 显示所有保存的token
     const allTokens = {};
     if (this.authManager && this.authManager.tokens) {
@@ -2196,27 +2309,27 @@ class HexoProDesktop {
       }
       console.log('[Desktop]: 所有保存的token:', allTokens);
     }
-    
+
     const token = this.authManager.getToken(this.currentProjectPath);
     console.log('[Desktop]: 获取到的token:', token ? '存在(长度:' + token.length + ')' : '不存在');
-    
+
     return token;
   }
 
   async injectToken(tokenToInject) {
     try {
       console.log('[Desktop]: 开始执行token注入...');
-      
+
       if (tokenToInject) {
         console.log('[Desktop]: 准备注入的token长度:', tokenToInject.length);
-        
+
         // 验证token格式 - JWT应该是3个用.分隔的base64字符串
         const jwtPattern = /^[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]*$/;
         if (!jwtPattern.test(tokenToInject)) {
           console.error('[Desktop]: Token格式无效，不是标准JWT格式:', tokenToInject.substring(0, 50) + '...');
           return false;
         }
-        
+
         const script = `
           (function() {
             try {
@@ -2254,12 +2367,12 @@ class HexoProDesktop {
             }
           })();
         `;
-        
+
         const result = await this.mainWindow.webContents.executeJavaScript(script);
         console.log('[Desktop]: Token注入结果:', result);
-        
+
         return result && result.success;
-        
+
       } else {
         console.log('[Desktop]: 没有提供token，跳过注入');
         return false;
@@ -2274,7 +2387,7 @@ class HexoProDesktop {
   async injectLocalStorageInterceptor() {
     try {
       console.log('[Desktop]: 注入localStorage拦截器...');
-      
+
       const interceptorScript = `
         (function() {
           try {
@@ -2393,16 +2506,16 @@ class HexoProDesktop {
           }
         })();
       `;
-      
+
       const result = await this.mainWindow.webContents.executeJavaScript(interceptorScript);
       console.log('[Desktop]: localStorage拦截器注入结果:', result);
-      
+
       if (result && result.success) {
         console.log('[Desktop]: localStorage拦截器注入成功');
       } else {
         console.error('[Desktop]: localStorage拦截器注入失败:', result ? result.message : '未知错误');
       }
-      
+
     } catch (error) {
       console.error('[Desktop]: localStorage拦截器注入异常:', error);
       // 不抛出错误，避免影响整个应用
@@ -2413,7 +2526,7 @@ class HexoProDesktop {
   async injectDesktopFeatures() {
     try {
       console.log('[Desktop]: 开始注入桌面端功能...');
-      
+
       // 检查主窗口是否存在
       if (!this.mainWindow || !this.mainWindow.webContents) {
         console.warn('[Desktop]: 主窗口或webContents不存在，跳过功能注入');
@@ -2478,7 +2591,7 @@ class HexoProDesktop {
           return { success: true, message: '注入成功' };
         })();
       `);
-      
+
       console.log('[Desktop]: 桌面端功能注入结果:', result);
       console.log('[Desktop]: 桌面端功能注入完成');
 
@@ -2492,7 +2605,7 @@ class HexoProDesktop {
   async cleanupInvalidTokens() {
     try {
       console.log('[Desktop]: 开始清理无效tokens...');
-      
+
       const script = `
         (function() {
           try {
@@ -2525,10 +2638,10 @@ class HexoProDesktop {
           }
         })();
       `;
-      
+
       const result = await this.mainWindow.webContents.executeJavaScript(script);
       console.log('[Desktop]: Token清理结果:', result);
-      
+
       return result && result.cleaned;
     } catch (error) {
       console.error('[Desktop]: 清理token过程中发生异常:', error);
@@ -2766,7 +2879,7 @@ class HexoProDesktop {
     try {
       // 步骤1: 初始化Hexo项目
       sendProgress('正在初始化 Hexo 项目...', `开始初始化项目: ${projectName}`);
-      
+
       await this.executeCommand(`hexo init ${projectName}`, path.dirname(projectPath), (output) => {
         sendProgress(null, output.data.trim(), output.type === 'stderr' ? 'stderr' : 'stdout');
       });
@@ -2775,7 +2888,7 @@ class HexoProDesktop {
 
       // 步骤2: 安装依赖
       sendProgress('正在安装项目依赖...', '开始安装 npm 依赖');
-      
+
       await this.executeCommand('npm install', projectPath, (output) => {
         sendProgress(null, output.data.trim(), output.type === 'stderr' ? 'stderr' : 'stdout');
       });
@@ -2784,7 +2897,7 @@ class HexoProDesktop {
 
       // 步骤3: 验证项目
       sendProgress('正在验证项目...', '验证项目结构');
-      
+
       const validation = await this.validateHexoProject(projectPath);
       if (!validation.isValid) {
         throw new Error(`项目验证失败: ${validation.message}`);
@@ -2795,9 +2908,9 @@ class HexoProDesktop {
       // 步骤4: 加载项目
       sendProgress('正在加载项目...', '启动项目服务');
       console.log('[创建项目]: 即将调用loadProject方法，项目路径:', projectPath);
-      
+
       await this.loadProject(projectPath);
-      
+
       console.log('[创建项目]: loadProject方法调用完成，继续后续步骤');
       sendProgress('项目创建完成', '项目已成功创建并加载');
 
@@ -2818,7 +2931,7 @@ class HexoProDesktop {
 
     } catch (error) {
       console.error('[创建项目]: 项目创建失败:', error);
-      
+
       // 清理失败的项目目录
       try {
         if (await fs.pathExists(projectPath)) {
@@ -2992,7 +3105,7 @@ class HexoProDesktop {
     `;
 
     this.loadingWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHtml)}`);
-    
+
     // 窗口关闭时清理
     this.loadingWindow.on('closed', () => {
       this.loadingWindow = null;
@@ -3158,7 +3271,7 @@ class HexoProDesktop {
     `;
 
     this.loadingWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHtml)}`);
-    
+
     // 窗口关闭时清理
     this.loadingWindow.on('closed', () => {
       this.loadingWindow = null;

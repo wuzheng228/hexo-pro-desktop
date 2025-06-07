@@ -5,7 +5,19 @@ const bodyParser = require('body-parser');
 const serveStatic = require('serve-static');
 const net = require('net');
 const mime = require('mime');
-// 移除不需要的代理中间件
+
+// 添加fetch支持（对于Node.js < 18版本）
+const fetch = (() => {
+  try {
+    const nodeFetch = require('node-fetch');
+    console.log('[Hexo Server]: 使用 node-fetch 库');
+    return nodeFetch;
+  } catch (error) {
+    // Node.js 18+ 内置fetch
+    console.log('[Hexo Server]: 使用内置 fetch API');
+    return globalThis.fetch;
+  }
+})();
 
 // 复制 hexo-pro 的核心模块
 const api = require('./hexo-pro-core/api');
@@ -29,17 +41,17 @@ class HexoProServer {
         console.log('[Hexo Server]: 重置数据库管理器状态');
         databaseManager.reset();
       }
-      
+
       // 初始化 Hexo 实例
       await this.initHexo();
-      
+
       // 启动集成的 Hexo 服务器（包含博客静态文件、API 和管理界面）
       await this.startIntegratedHexoServer();
-      
-      console.log(`Hexo Pro Server started at http://localhost:${this.hexoPort}`);
-      
+
+      console.log(`Hexo Pro Server started at http://127.0.0.1:${this.hexoPort}`);
+
       return {
-        url: `http://localhost:${this.hexoPort}`,
+        url: `http://127.0.0.1:${this.hexoPort}`,
         port: this.hexoPort
       };
     } catch (error) {
@@ -55,15 +67,15 @@ class HexoProServer {
 
     try {
       console.log('[Hexo Server]: 启动集成的 Hexo 服务器...');
-      
+
       // 先注册Hexo插件（在服务器启动前）
       await this.registerHexoPlugin();
-      
+
       // 改进的端口选择逻辑，包含错误处理
       let availablePort;
       let attempts = 0;
       const maxAttempts = 3;
-      
+
       while (attempts < maxAttempts) {
         try {
           console.log(`[Hexo Server]: 第 ${attempts + 1} 次尝试寻找可用端口...`);
@@ -72,7 +84,7 @@ class HexoProServer {
         } catch (error) {
           attempts++;
           console.error(`[Hexo Server]: 端口选择失败 (尝试 ${attempts}/${maxAttempts}):`, error.message);
-          
+
           if (attempts >= maxAttempts) {
             // 最后一次尝试：使用完全动态的端口
             console.log('[Hexo Server]: 所有预定义端口都失败，尝试完全动态端口分配');
@@ -88,10 +100,10 @@ class HexoProServer {
           }
         }
       }
-      
+
       this.hexoPort = availablePort;
       console.log(`[Hexo Server]: 最终使用端口 ${this.hexoPort}`);
-      
+
       // 启动 Hexo 内置服务器
       this.hexoServer = await this.hexoInstance.call('server', {
         port: this.hexoPort,
@@ -101,11 +113,36 @@ class HexoProServer {
         draft: false,
         log: false // 减少日志输出
       });
-      
+
       console.log(`[Hexo Server]: 集成的 Hexo 服务器已启动在 127.0.0.1:${this.hexoPort}`);
+
+      // Windows系统额外等待，确保服务器完全就绪
+      if (process.platform === 'win32') {
+        console.log('[Hexo Server]: Windows系统，等待服务器完全就绪...');
+        await new Promise(resolve => setTimeout(resolve, 2000)); // 等待2秒
+
+        // 验证服务器是否真的可以响应请求
+        const maxVerifyAttempts = 5;
+        for (let i = 0; i < maxVerifyAttempts; i++) {
+          try {
+            const testResponse = await fetch(`http://127.0.0.1:${this.hexoPort}/hexopro/api/desktop/status`);
+            if (testResponse.ok) {
+              console.log('[Hexo Server]: Windows服务器就绪验证成功');
+              break;
+            }
+          } catch (error) {
+            if (i === maxVerifyAttempts - 1) {
+              console.warn('[Hexo Server]: Windows服务器就绪验证失败，但继续启动');
+            } else {
+              console.log(`[Hexo Server]: Windows服务器就绪验证尝试 ${i + 1}/${maxVerifyAttempts} 失败，继续重试`);
+              await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+          }
+        }
+      }
     } catch (error) {
       console.error('[Hexo Server]: 启动集成的 Hexo 服务器失败:', error);
-      
+
       // 提供更友好的错误信息
       if (error.message.includes('EACCES') || error.message.includes('权限被拒绝')) {
         const enhancedError = new Error(
@@ -119,22 +156,22 @@ class HexoProServer {
         enhancedError.code = 'PORT_PERMISSION_DENIED';
         throw enhancedError;
       }
-      
+
       throw error;
     }
   }
 
   async registerHexoPlugin() {
     console.log('[Hexo Server]: 注册Hexo插件...');
-    
+
     // 创建一个临时插件来添加我们的路由
     this.hexoInstance.extend.filter.register('server_middleware', (app) => {
       console.log('[Hexo Server]: Hexo插件 - 添加中间件到应用');
-      
+
       // 检查是否已经初始化过数据库，避免重复初始化
       if (!global.hexoProDbInitialized) {
         console.log('[Hexo Server]: 首次初始化，设置中间件...');
-        
+
         // 添加查询字符串解析中间件
         const querystring = require('querystring');
         app.use((req, res, next) => {
@@ -144,32 +181,32 @@ class HexoProServer {
           }
           next();
         });
-        
+
         // 添加body parser中间件（用于API）
         const bodyParser = require('body-parser');
         app.use('/hexopro/api', bodyParser.json({ limit: '50mb' }));
         app.use('/hexopro/api', bodyParser.urlencoded({ extended: true }));
-        
+
         // 添加hexo-pro管理界面的静态文件服务
         const serveStatic = require('serve-static');
         app.use('/pro', serveStatic(path.join(__dirname, 'hexo-pro-core/www')));
-        
+
         // 处理前端路由（SPA）
         app.use('/pro', (req, res, next) => {
           console.log('[Hexo Server]: 收到前端路由请求:', req.originalUrl);
           console.log('[Hexo Server]: 请求方法:', req.method);
           console.log('[Hexo Server]: 请求头:', req.headers);
-          
+
           const isStaticFile = ['.html', '.css', '.js', '.jpg', '.png', '.gif', '.svg', '.ico'].some(
             extension => req.originalUrl.endsWith(extension)
           );
-          
+
           console.log('[Hexo Server]: 是否静态文件:', isStaticFile);
-          
+
           if (!isStaticFile) {
             const indexPath = path.resolve(__dirname, 'hexo-pro-core/www/index.html');
             console.log('[Hexo Server]: 准备发送index.html, 路径:', indexPath);
-            
+
             // 检查文件是否存在
             if (!fs.existsSync(indexPath)) {
               console.error('[Hexo Server]: index.html不存在:', indexPath);
@@ -177,7 +214,7 @@ class HexoProServer {
               res.end('File not found');
               return;
             }
-            
+
             // 检查 sendFile 方法是否可用
             if (typeof res.sendFile === 'function') {
               console.log('[Hexo Server]: 使用 sendFile 方法');
@@ -190,7 +227,7 @@ class HexoProServer {
               // 降级方案：直接读取文件并发送
               console.log('[Hexo Server]: 使用降级方案读取文件');
               const fs = require('fs');
-              
+
               fs.readFile(indexPath, (err, data) => {
                 if (err) {
                   console.error('[Hexo Server]: 读取文件失败:', err);
@@ -209,37 +246,37 @@ class HexoProServer {
             next();
           }
         });
-        
+
         // 添加桌面端特定路由
         this.setupDesktopRoutesForConnect(app);
-        
+
         // 标记数据库已初始化
         global.hexoProDbInitialized = true;
       } else {
         console.log('[Hexo Server]: 数据库已初始化，跳过中间件设置');
       }
-      
+
       // 添加 hexo-pro 的 API 路由（每次都需要重新绑定到新的app实例）
       api(app, this.hexoInstance).then(() => {
         console.log('[Hexo Server]: API路由已添加');
       }).catch(error => {
         console.error('[Hexo Server]: 添加API路由失败:', error);
       });
-      
+
       console.log('[Hexo Server]: Hexo插件 - 中间件添加完成');
     });
-    
+
     console.log('[Hexo Server]: Hexo插件已注册');
   }
 
   async findAvailablePort(startPort) {
     const os = require('os');
     const platform = os.platform();
-    
+
     // Windows系统的端口选择策略
     if (platform === 'win32') {
       console.log('[Hexo Server]: 检测到Windows系统，使用优化的端口选择策略');
-      
+
       // Windows上优先尝试用户端口范围(1024-65535)
       // 避免系统保留端口和需要管理员权限的端口
       const safePorts = [
@@ -248,7 +285,7 @@ class HexoProServer {
         8000, 8001, 8002, 8003, 8004, 8005, // 高端口
         5000, 5001, 5002, 5003, 5004, 5005  // 其他常用端口
       ];
-      
+
       // 先尝试预定义的安全端口
       for (const port of safePorts) {
         try {
@@ -262,7 +299,7 @@ class HexoProServer {
           continue;
         }
       }
-      
+
       // 如果预定义端口都不可用，尝试动态分配
       console.log('[Hexo Server]: Windows - 预定义端口都不可用，尝试动态分配');
       return await this.findDynamicPort();
@@ -274,7 +311,7 @@ class HexoProServer {
           return port;
         }
       }
-      
+
       throw new Error(`无法找到可用端口，从 ${startPort} 开始尝试了100个端口`);
     }
   }
@@ -282,7 +319,7 @@ class HexoProServer {
   async isPortAvailableWithPermissionCheck(port) {
     return new Promise((resolve, reject) => {
       const server = net.createServer();
-      
+
       server.on('error', (error) => {
         if (error.code === 'EACCES') {
           console.log(`[Hexo Server]: 端口 ${port} 权限被拒绝 (EACCES)`);
@@ -295,7 +332,7 @@ class HexoProServer {
           resolve(false);
         }
       });
-      
+
       server.listen(port, '127.0.0.1', () => {
         server.close(() => {
           console.log(`[Hexo Server]: 端口 ${port} 测试成功`);
@@ -307,10 +344,10 @@ class HexoProServer {
 
   async findDynamicPort() {
     console.log('[Hexo Server]: 尝试使用系统分配的动态端口');
-    
+
     return new Promise((resolve, reject) => {
       const server = net.createServer();
-      
+
       server.listen(0, '127.0.0.1', () => {
         const port = server.address().port;
         server.close(() => {
@@ -318,7 +355,7 @@ class HexoProServer {
           resolve(port);
         });
       });
-      
+
       server.on('error', (error) => {
         console.error('[Hexo Server]: 动态端口分配失败:', error);
         reject(error);
@@ -329,13 +366,13 @@ class HexoProServer {
   async isPortAvailable(port) {
     return new Promise((resolve) => {
       const server = net.createServer();
-      
+
       server.listen(port, '127.0.0.1', () => {
         server.close(() => {
           resolve(true);
         });
       });
-      
+
       server.on('error', () => {
         resolve(false);
       });
@@ -373,7 +410,7 @@ class HexoProServer {
       console.log('[Desktop Server]: 请求方法:', req.method);
       console.log('[Desktop Server]: 请求头:', req.headers);
       console.log('[Desktop Server]: 请求体:', req.body);
-      
+
       if (req.method === 'POST') {
         try {
           const { token } = req.body;
@@ -382,7 +419,7 @@ class HexoProServer {
           console.log('[Desktop Server]: Token内容预览:', token ? token.substring(0, 20) + '...' : '无token');
           console.log('[Desktop Server]: 项目路径:', this.projectPath);
           console.log('[Desktop Server]: global.desktopAuthManager存在:', !!global.desktopAuthManager);
-          
+
           if (!token) {
             console.error('[Desktop Server]: 请求中缺少token');
             res.statusCode = 400;
@@ -390,7 +427,7 @@ class HexoProServer {
             res.end(JSON.stringify({ success: false, message: '缺少token' }));
             return;
           }
-          
+
           // 验证token格式 - JWT应该是3个用.分隔的base64字符串
           const jwtPattern = /^[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]*$/;
           if (!jwtPattern.test(token)) {
@@ -400,9 +437,9 @@ class HexoProServer {
             res.end(JSON.stringify({ success: false, message: 'Token格式无效，必须是标准JWT格式' }));
             return;
           }
-          
+
           console.log('[Desktop Server]: Token格式验证通过');
-          
+
           if (!this.projectPath) {
             console.error('[Desktop Server]: 当前项目路径未设置');
             res.statusCode = 400;
@@ -410,7 +447,7 @@ class HexoProServer {
             res.end(JSON.stringify({ success: false, message: '当前项目路径未设置' }));
             return;
           }
-          
+
           if (!global.desktopAuthManager) {
             console.error('[Desktop Server]: AuthManager实例不可用');
             res.statusCode = 500;
@@ -418,13 +455,13 @@ class HexoProServer {
             res.end(JSON.stringify({ success: false, message: 'AuthManager不可用' }));
             return;
           }
-          
+
           console.log('[Desktop Server]: 正在保存token到AuthManager...');
-          
+
           // 异步保存token，避免阻塞响应
           global.desktopAuthManager.setToken(this.projectPath, token).then(() => {
             console.log('[Desktop Server]: Token保存操作完成');
-            
+
             // 验证token是否真的被保存了
             setTimeout(() => {
               const savedToken = global.desktopAuthManager.getToken(this.projectPath);
@@ -439,11 +476,11 @@ class HexoProServer {
           }).catch((error) => {
             console.error('[Desktop Server]: 保存token时出错:', error);
           });
-          
+
           console.log('[Desktop Server]: 立即响应成功（异步保存）');
           res.setHeader('Content-Type', 'application/json');
           res.end(JSON.stringify({ success: true, message: 'Token保存请求已接收' }));
-          
+
         } catch (error) {
           console.error('[Desktop Server]: 保存token失败:', error);
           res.statusCode = 500;
@@ -469,7 +506,7 @@ class HexoProServer {
         }));
         return;
       }
-      
+
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({
         projectPath: this.projectPath,
@@ -491,7 +528,7 @@ class HexoProServer {
   async initHexo() {
     // 动态引入 Hexo
     const Hexo = require('hexo');
-    
+
     // 创建 Hexo 实例
     this.hexoInstance = new Hexo(this.projectPath, {
       debug: false,
@@ -502,13 +539,13 @@ class HexoProServer {
 
     // 初始化 Hexo
     await this.hexoInstance.init();
-    
+
     // 加载插件和主题
     await this.hexoInstance.load();
-    
+
     // 将 hexo 实例设为全局变量，供插件使用
     global.hexo = this.hexoInstance;
-    
+
     // 立即初始化数据库管理器
     console.log('[Hexo Server]: 预初始化数据库管理器...');
     try {
@@ -518,7 +555,7 @@ class HexoProServer {
       console.error('[Hexo Server]: 数据库管理器预初始化失败:', error);
       throw error;
     }
-    
+
     // 构建索引文件（用于全局搜索）
     try {
       const hexoProCore = require('./hexo-pro-core/index');
@@ -541,7 +578,7 @@ class HexoProServer {
         console.log('[Hexo Server]: 创建了空的搜索索引文件');
       }
     }
-    
+
     // 启动文件监听
     await this.startWatching();
   }
@@ -598,12 +635,12 @@ class HexoProServer {
 
     try {
       console.log('[Hexo Server]: 停止文件监听...');
-      
+
       // 停止监听
       if (this.hexoInstance.unwatch) {
         await this.hexoInstance.unwatch();
       }
-      
+
       this.isWatching = false;
       console.log('[Hexo Server]: 文件监听已停止');
     } catch (error) {
@@ -613,10 +650,10 @@ class HexoProServer {
 
   async stop() {
     console.log('正在停止 Hexo Pro Server...');
-    
+
     // 停止文件监听
     await this.stopWatching();
-    
+
     // 停止 Hexo 内置服务器
     if (this.hexoServer) {
       try {
@@ -631,7 +668,7 @@ class HexoProServer {
         console.error('[Hexo Server]: 停止 Hexo 内置服务器时出错:', error);
       }
     }
-    
+
     // 停止基本服务器（如果有）
     if (this.server) {
       try {
@@ -641,7 +678,7 @@ class HexoProServer {
         console.error('[Hexo Server]: 停止基本服务器时出错:', error);
       }
     }
-    
+
     // 清理全局状态
     if (global.hexo) {
       delete global.hexo;
@@ -652,29 +689,29 @@ class HexoProServer {
     if (global.jwtSecret) {
       delete global.jwtSecret;
     }
-    
+
     // 清理数据库初始化标记，允许下次重新初始化
     if (global.hexoProDbInitialized) {
       delete global.hexoProDbInitialized;
     }
-    
+
     // 重置数据库管理器状态
     console.log('[Hexo Server]: 重置数据库管理器状态');
     databaseManager.reset();
-    
+
     // 重置端口为默认值
     this.hexoPort = 4000;
-    
+
     console.log('Hexo Pro Server stopped');
   }
 
   // 强制停止服务器（用于错误恢复）
   async forceStop() {
     console.log('强制停止 Hexo Pro Server...');
-    
+
     // 停止文件监听
     await this.stopWatching();
-    
+
     // 强制停止 Hexo 内置服务器
     if (this.hexoServer) {
       try {
@@ -687,11 +724,11 @@ class HexoProServer {
       }
       this.hexoServer = null;
     }
-    
+
     // 清理所有状态
     this.hexoInstance = null;
     this.isWatching = false;
-    
+
     // 清理全局状态
     if (global.hexo) {
       delete global.hexo;
@@ -702,44 +739,44 @@ class HexoProServer {
     if (global.jwtSecret) {
       delete global.jwtSecret;
     }
-    
+
     // 清理数据库初始化标记
     if (global.hexoProDbInitialized) {
       delete global.hexoProDbInitialized;
     }
-    
+
     // 重置数据库管理器状态
     console.log('[Hexo Server]: 强制重置数据库管理器状态');
     databaseManager.reset();
-    
+
     // 重置端口
     this.hexoPort = 4000;
-    
+
     console.log('服务器已强制停止');
   }
 
   async restart() {
     console.log('重启 Hexo Pro Server...');
-    
+
     // 停止当前服务器
     await this.stop();
-    
+
     // 重新初始化状态
     this.isWatching = false;
-    
+
     // 重新初始化 Hexo
     if (this.hexoInstance) {
       // 清理当前实例
       delete global.hexo;
       this.hexoInstance = null;
     }
-    
+
     // 重新启动
     await this.start();
   }
 
   getUrl() {
-    return `http://localhost:${this.hexoPort}`;
+    return `http://127.0.0.1:${this.hexoPort}`;
   }
 
   getPort() {
@@ -798,17 +835,17 @@ class HexoProServer {
     try {
       // 创建简单的静态服务器（用于当没有项目加载时）
       this.app = express();
-      
+
       // 设置基本中间件
       this.setupBasicMiddleware();
-      
+
       // 启动服务器
       await this.startBasicServer();
-      
-      console.log(`静态服务器已启动 at http://localhost:${this.hexoPort}`);
-      
+
+      console.log(`静态服务器已启动 at http://127.0.0.1:${this.hexoPort}`);
+
       return {
-        url: `http://localhost:${this.hexoPort}`,
+        url: `http://127.0.0.1:${this.hexoPort}`,
         port: this.hexoPort
       };
     } catch (error) {
@@ -827,11 +864,11 @@ class HexoProServer {
       const isStaticFile = ['.html', '.css', '.js', '.jpg', '.png', '.gif', '.svg', '.ico'].some(
         extension => req.originalUrl.endsWith(extension)
       );
-      
+
       if (!isStaticFile) {
         // 对于非静态文件请求，返回 index.html（用于前端路由）
         const indexPath = path.resolve(__dirname, 'hexo-pro-core/www/index.html');
-        
+
         // 检查 sendFile 方法是否可用
         if (typeof res.sendFile === 'function') {
           res.sendFile(indexPath);
@@ -841,7 +878,7 @@ class HexoProServer {
         } else {
           // 降级方案：直接读取文件并发送
           const fs = require('fs');
-          
+
           fs.readFile(indexPath, (err, data) => {
             if (err) {
               res.writeHead(404, { 'Content-Type': 'text/plain' });
@@ -883,16 +920,16 @@ class HexoProServer {
     return new Promise((resolve, reject) => {
       const os = require('os');
       const platform = os.platform();
-      
+
       const startServerWithPort = async (port) => {
         return new Promise((resolvePort, rejectPort) => {
           console.log(`[Hexo Server]: 尝试在端口 ${port} 启动基本服务器...`);
-          
+
           // Windows系统特殊处理
           const serverOptions = platform === 'win32' ? {
             host: '127.0.0.1' // Windows上明确使用localhost
           } : {};
-          
+
           this.server = this.app.listen(port, serverOptions.host, (err) => {
             if (err) {
               rejectPort(err);
@@ -902,13 +939,13 @@ class HexoProServer {
               resolvePort();
             }
           });
-          
+
           this.server.on('error', (err) => {
             rejectPort(err);
           });
         });
       };
-      
+
       const tryStartWithFallback = async () => {
         try {
           // 先尝试找到可用端口
@@ -917,7 +954,7 @@ class HexoProServer {
           resolve();
         } catch (error) {
           console.error('[Hexo Server]: 启动基本服务器失败:', error);
-          
+
           if (error.message.includes('EACCES') || error.message.includes('权限被拒绝')) {
             // 权限错误的特殊处理
             try {
@@ -938,7 +975,7 @@ class HexoProServer {
           }
         }
       };
-      
+
       tryStartWithFallback();
     });
   }

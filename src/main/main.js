@@ -1,8 +1,12 @@
 const { app, BrowserWindow, Menu, dialog, shell, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs-extra');
+const { exec, spawn } = require('child_process');
+const { promisify } = require('util');
 const HexoProServer = require('./hexo-server');
 const AuthManager = require('./auth-manager');
+
+const execAsync = promisify(exec);
 
 // 对于Node.js < 18版本，需要安装node-fetch
 const fetch = (() => {
@@ -21,6 +25,7 @@ let store;
 class HexoProDesktop {
   constructor() {
     this.mainWindow = null;
+    this.progressWindow = null;
     this.hexoServer = null;
     this.currentProjectPath = null;
     this.isDev = process.env.NODE_ENV === 'development';
@@ -283,6 +288,153 @@ class HexoProDesktop {
     }
   }
 
+  // 验证项目名称是否符合规范
+  validateProjectName(projectName) {
+    if (!projectName || typeof projectName !== 'string') {
+      return {
+        isValid: false,
+        message: '项目名称不能为空'
+      };
+    }
+
+    // 去除首尾空格
+    projectName = projectName.trim();
+
+    // 长度检查
+    if (projectName.length === 0) {
+      return {
+        isValid: false,
+        message: '项目名称不能为空'
+      };
+    }
+
+    if (projectName.length > 100) {
+      return {
+        isValid: false,
+        message: '项目名称不能超过100个字符'
+      };
+    }
+
+    // GitHub仓库名称规范：只能包含字母、数字、连字符和下划线
+    const validNamePattern = /^[a-zA-Z0-9_-]+$/;
+    if (!validNamePattern.test(projectName)) {
+      return {
+        isValid: false,
+        message: '项目名称只能包含英文字母、数字、连字符(-)和下划线(_)'
+      };
+    }
+
+    // 不能以连字符或下划线开头或结尾
+    if (projectName.startsWith('-') || projectName.startsWith('_') || 
+        projectName.endsWith('-') || projectName.endsWith('_')) {
+      return {
+        isValid: false,
+        message: '项目名称不能以连字符(-)或下划线(_)开头或结尾'
+      };
+    }
+
+    // 不能包含连续的连字符
+    if (projectName.includes('--')) {
+      return {
+        isValid: false,
+        message: '项目名称不能包含连续的连字符(--)'
+      };
+    }
+
+    // 检查是否为保留名称
+    const reservedNames = ['con', 'prn', 'aux', 'nul', 'com1', 'com2', 'com3', 'com4', 'com5', 'com6', 'com7', 'com8', 'com9', 'lpt1', 'lpt2', 'lpt3', 'lpt4', 'lpt5', 'lpt6', 'lpt7', 'lpt8', 'lpt9'];
+    if (reservedNames.includes(projectName.toLowerCase())) {
+      return {
+        isValid: false,
+        message: '项目名称不能使用系统保留名称'
+      };
+    }
+
+    return {
+      isValid: true,
+      message: '项目名称格式正确'
+    };
+  }
+
+  // 检查系统依赖
+  async checkSystemDependencies() {
+    const results = {
+      npm: false,
+      hexoCli: false,
+      errors: []
+    };
+
+    try {
+      console.log('[依赖检查]: 检查 npm...');
+      const npmResult = await execAsync('npm --version');
+      results.npm = true;
+      console.log('[依赖检查]: npm版本:', npmResult.stdout.trim());
+    } catch (error) {
+      console.error('[依赖检查]: npm检查失败:', error.message);
+      results.errors.push('npm未安装或不在PATH中');
+    }
+
+    try {
+      console.log('[依赖检查]: 检查 hexo-cli...');
+      const hexoResult = await execAsync('hexo --version');
+      results.hexoCli = true;
+      console.log('[依赖检查]: hexo-cli版本:', hexoResult.stdout.trim().split('\n')[0]);
+    } catch (error) {
+      console.error('[依赖检查]: hexo-cli检查失败:', error.message);
+      results.errors.push('hexo-cli未安装，请运行 npm install hexo-cli -g 安装');
+    }
+
+    return results;
+  }
+
+  // 执行shell命令并显示进度
+  async executeCommand(command, workingDir, progressCallback) {
+    return new Promise((resolve, reject) => {
+      console.log(`[命令执行]: 在 ${workingDir} 执行: ${command}`);
+      
+      const child = spawn(command, [], {
+        cwd: workingDir,
+        shell: true,
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      child.stdout.on('data', (data) => {
+        const output = data.toString();
+        stdout += output;
+        console.log(`[命令输出]: ${output.trim()}`);
+        if (progressCallback) {
+          progressCallback({ type: 'stdout', data: output });
+        }
+      });
+
+      child.stderr.on('data', (data) => {
+        const output = data.toString();
+        stderr += output;
+        console.error(`[命令错误]: ${output.trim()}`);
+        if (progressCallback) {
+          progressCallback({ type: 'stderr', data: output });
+        }
+      });
+
+      child.on('close', (code) => {
+        console.log(`[命令执行]: 命令执行完成，退出码: ${code}`);
+        if (code === 0) {
+          resolve({ stdout, stderr, code });
+        } else {
+          reject(new Error(`命令执行失败，退出码: ${code}\n错误信息: ${stderr}`));
+        }
+      });
+
+      child.on('error', (error) => {
+        console.error(`[命令执行]: 命令执行异常:`, error);
+        reject(error);
+      });
+    });
+  }
+
   createMenu() {
     const template = [
       {
@@ -411,16 +563,319 @@ class HexoProDesktop {
   }
 
   async createNewProject() {
-    const result = await dialog.showOpenDialog(this.mainWindow, {
-      properties: ['openDirectory', 'createDirectory'],
-      title: '选择新博客项目的目录'
-    });
+    try {
+      console.log('[创建项目]: 开始创建新项目流程...');
 
-    if (!result.canceled && result.filePaths.length > 0) {
-      const projectPath = result.filePaths[0];
-      // 通知渲染进程创建新项目
-      this.mainWindow.webContents.send('create-new-project', projectPath);
+      // 1. 检查系统依赖
+      console.log('[创建项目]: 检查系统依赖...');
+      const dependencies = await this.checkSystemDependencies();
+      
+      if (!dependencies.npm || !dependencies.hexoCli) {
+        const missingDeps = dependencies.errors.join('\n');
+        const result = await dialog.showMessageBox(this.mainWindow, {
+          type: 'error',
+          title: '缺少必要依赖',
+          message: '创建Hexo项目需要以下依赖：',
+          detail: `${missingDeps}\n\n请先安装缺少的依赖后再创建项目。\n\n安装方法：\n1. 安装 Node.js (包含npm)\n2. 运行命令: npm install hexo-cli -g`,
+          buttons: ['取消', '继续创建', '打开安装指南'],
+          defaultId: 0,
+          cancelId: 0
+        });
+
+        if (result.response === 0) {
+          return; // 用户选择取消
+        } else if (result.response === 2) {
+          // 打开安装指南
+          shell.openExternal('https://hexo.io/zh-cn/docs/');
+          return;
+        }
+        // 用户选择继续创建，尝试继续（可能有些依赖实际存在但检查失败）
+      }
+
+      // 2. 选择父目录
+      console.log('[创建项目]: 选择项目父目录...');
+      const result = await dialog.showOpenDialog(this.mainWindow, {
+        properties: ['openDirectory', 'createDirectory'],
+        title: '选择新博客项目的父目录'
+      });
+
+      if (result.canceled || !result.filePaths.length) {
+        console.log('[创建项目]: 用户取消目录选择');
+        return;
+      }
+
+      const parentDir = result.filePaths[0];
+      console.log('[创建项目]: 选择的父目录:', parentDir);
+
+      // 3. 输入项目名称
+      console.log('[创建项目]: 请求项目名称输入...');
+      const projectNameResult = await this.showProjectNameDialog();
+      
+      if (!projectNameResult.success) {
+        console.log('[创建项目]: 用户取消项目名称输入');
+        return;
+      }
+
+      const projectName = projectNameResult.projectName;
+      const projectPath = path.join(parentDir, projectName);
+
+      // 4. 检查项目目录是否已存在
+      if (await fs.pathExists(projectPath)) {
+        const overwriteResult = await dialog.showMessageBox(this.mainWindow, {
+          type: 'warning',
+          title: '目录已存在',
+          message: `目录 "${projectName}" 已存在`,
+          detail: '是否要覆盖现有目录？这将删除目录中的所有内容。',
+          buttons: ['取消', '覆盖'],
+          defaultId: 0,
+          cancelId: 0
+        });
+
+        if (overwriteResult.response === 0) {
+          console.log('[创建项目]: 用户取消覆盖');
+          return;
+        }
+
+        // 删除现有目录
+        console.log('[创建项目]: 删除现有目录:', projectPath);
+        await fs.remove(projectPath);
+      }
+
+      // 5. 显示进度对话框并创建项目
+      await this.createProjectWithProgress(projectPath, projectName);
+
+    } catch (error) {
+      console.error('[创建项目]: 创建项目失败:', error);
+      dialog.showErrorBox('创建项目失败', `创建项目时出现错误：\n${error.message}`);
     }
+  }
+
+  // 显示项目名称输入对话框
+  async showProjectNameDialog() {
+    return new Promise((resolve) => {
+      const inputWindow = new BrowserWindow({
+        width: 450,
+        height: 300,
+        resizable: false,
+        modal: true,
+        parent: this.mainWindow,
+        webPreferences: {
+          nodeIntegration: true,
+          contextIsolation: false
+        },
+        title: '创建新项目'
+      });
+
+      const html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="UTF-8">
+          <title>创建新项目</title>
+          <style>
+            body {
+              font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+              margin: 0;
+              padding: 20px;
+              background-color: #f5f5f5;
+            }
+            .container {
+              background: white;
+              padding: 30px;
+              border-radius: 8px;
+              box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            }
+            h2 {
+              margin-top: 0;
+              color: #333;
+              text-align: center;
+            }
+            .form-group {
+              margin-bottom: 20px;
+            }
+            label {
+              display: block;
+              margin-bottom: 8px;
+              font-weight: 500;
+              color: #555;
+            }
+            input {
+              width: 100%;
+              padding: 10px;
+              border: 2px solid #ddd;
+              border-radius: 4px;
+              font-size: 14px;
+              box-sizing: border-box;
+            }
+            input:focus {
+              border-color: #007acc;
+              outline: none;
+            }
+            .help-text {
+              font-size: 12px;
+              color: #666;
+              margin-top: 5px;
+            }
+            .error-text {
+              font-size: 12px;
+              color: #e74c3c;
+              margin-top: 5px;
+            }
+            .buttons {
+              display: flex;
+              gap: 10px;
+              justify-content: flex-end;
+              margin-top: 30px;
+            }
+            button {
+              padding: 10px 20px;
+              border: none;
+              border-radius: 4px;
+              cursor: pointer;
+              font-size: 14px;
+              font-weight: 500;
+            }
+            .btn-cancel {
+              background-color: #6c757d;
+              color: white;
+            }
+            .btn-cancel:hover {
+              background-color: #5a6268;
+            }
+            .btn-create {
+              background-color: #007acc;
+              color: white;
+            }
+            .btn-create:hover {
+              background-color: #0056b3;
+            }
+            .btn-create:disabled {
+              background-color: #ccc;
+              cursor: not-allowed;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <h2>创建新的 Hexo 博客项目</h2>
+            <form id="projectForm">
+              <div class="form-group">
+                <label for="projectName">项目名称：</label>
+                <input type="text" id="projectName" placeholder="请输入项目名称" autofocus>
+                <div class="help-text">
+                  项目名称只能包含英文字母、数字、连字符(-)和下划线(_)，不能以连字符或下划线开头/结尾
+                </div>
+                <div id="errorMessage" class="error-text" style="display: none;"></div>
+              </div>
+              <div class="buttons">
+                <button type="button" class="btn-cancel" onclick="cancel()">取消</button>
+                <button type="submit" class="btn-create" id="createBtn" disabled>创建</button>
+              </div>
+            </form>
+          </div>
+
+          <script>
+            const { ipcRenderer } = require('electron');
+            const projectNameInput = document.getElementById('projectName');
+            const createBtn = document.getElementById('createBtn');
+            const errorMessage = document.getElementById('errorMessage');
+
+            // 项目名称验证
+            function validateProjectName(name) {
+              if (!name || typeof name !== 'string') {
+                return { isValid: false, message: '项目名称不能为空' };
+              }
+
+              name = name.trim();
+              if (name.length === 0) {
+                return { isValid: false, message: '项目名称不能为空' };
+              }
+              if (name.length > 100) {
+                return { isValid: false, message: '项目名称不能超过100个字符' };
+              }
+
+              const validNamePattern = /^[a-zA-Z0-9_-]+$/;
+              if (!validNamePattern.test(name)) {
+                return { isValid: false, message: '项目名称只能包含英文字母、数字、连字符(-)和下划线(_)' };
+              }
+
+              if (name.startsWith('-') || name.startsWith('_') || name.endsWith('-') || name.endsWith('_')) {
+                return { isValid: false, message: '项目名称不能以连字符(-)或下划线(_)开头或结尾' };
+              }
+
+              if (name.includes('--')) {
+                return { isValid: false, message: '项目名称不能包含连续的连字符(--)' };
+              }
+
+              const reservedNames = ['con', 'prn', 'aux', 'nul', 'com1', 'com2', 'com3', 'com4', 'com5', 'com6', 'com7', 'com8', 'com9', 'lpt1', 'lpt2', 'lpt3', 'lpt4', 'lpt5', 'lpt6', 'lpt7', 'lpt8', 'lpt9'];
+              if (reservedNames.includes(name.toLowerCase())) {
+                return { isValid: false, message: '项目名称不能使用系统保留名称' };
+              }
+
+              return { isValid: true, message: '项目名称格式正确' };
+            }
+
+            // 实时验证
+            projectNameInput.addEventListener('input', function() {
+              const name = this.value.trim();
+              const validation = validateProjectName(name);
+              
+              if (validation.isValid) {
+                createBtn.disabled = false;
+                errorMessage.style.display = 'none';
+                this.style.borderColor = '#ddd';
+              } else {
+                createBtn.disabled = true;
+                errorMessage.textContent = validation.message;
+                errorMessage.style.display = 'block';
+                this.style.borderColor = '#e74c3c';
+              }
+            });
+
+            // 表单提交
+            document.getElementById('projectForm').addEventListener('submit', function(e) {
+              e.preventDefault();
+              const projectName = projectNameInput.value.trim();
+              const validation = validateProjectName(projectName);
+              
+              if (validation.isValid) {
+                ipcRenderer.send('project-name-result', { success: true, projectName });
+              }
+            });
+
+            // 取消按钮
+            function cancel() {
+              ipcRenderer.send('project-name-result', { success: false });
+            }
+
+            // 回车键提交
+            projectNameInput.addEventListener('keydown', function(e) {
+              if (e.key === 'Enter' && !createBtn.disabled) {
+                document.getElementById('projectForm').dispatchEvent(new Event('submit'));
+              }
+            });
+          </script>
+        </body>
+        </html>
+      `;
+
+      inputWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+
+      // 处理结果
+      // const { ipcMain } = require('electron');
+      const handler = (event, result) => {
+        ipcMain.removeListener('project-name-result', handler);
+        inputWindow.close();
+        resolve(result);
+      };
+
+      ipcMain.on('project-name-result', handler);
+
+      inputWindow.on('closed', () => {
+        ipcMain.removeListener('project-name-result', handler);
+        resolve({ success: false });
+      });
+    });
   }
 
   async openProject() {
@@ -565,6 +1020,7 @@ class HexoProDesktop {
           if (response.ok) {
             console.log('项目已加载且服务器运行正常，无需重启');
             await this.loadWebInterface();
+            console.log('1022web界面加载完成了返回数据');
             return { url: serverUrl, port: this.hexoServer.getPort() };
           }
         } catch (error) {
@@ -641,25 +1097,40 @@ class HexoProDesktop {
       await this.waitForServer(serverInfo.url);
       
       // 直接加载 Web 界面（让hexo-pro自己处理登录）
+      console.log('[Desktop]: 即将调用loadWebInterface方法...');
       await this.loadWebInterface();
-      
+      console.log('[Desktop]: loadWebInterface方法调用完成');
+       console.log('1100web界面加载完成了返回数据');
       // 通知渲染进程项目已加载（如果当前在主页）
       if (this.mainWindow) {
+        console.log('[Desktop]: mainWindow存在，开始检查URL...');
         // 确保在 loadWebInterface 完成导航后，如果URL没有改变，则强制刷新以确保前端状态更新
         const finalUrl = this.mainWindow.webContents.getURL();
+        console.log('[Desktop]: 获取到finalUrl:', finalUrl);
+        console.log('[Desktop]: serverInfo.url:', serverInfo.url);
         if (finalUrl.startsWith(serverInfo.url)) {
           console.log('[Desktop]: 项目切换完成，Web界面URL与预期一致，通知前端项目已加载。', serverInfo.url, '\n ', finalUrl);
-          this.mainWindow.webContents.send('project-loaded', {
-            projectPath: projectPath,
-            serverUrl: serverInfo.url
-          });
+          // this.mainWindow.webContents.send('project-loaded', {
+          //   projectPath: projectPath,
+          //   serverUrl: serverInfo.url
+          // });
+          console.log('准备return serverInfo');
+          return serverInfo;
         } else {
           // 如果 loadWebInterface 后的 URL 不是期望的（例如还在旧项目的URL上），则强制加载新URL
           console.log(`[Desktop]: 项目切换后，URL (${finalUrl}) 与预期 (${serverInfo.url})不符，强制重新加载新URL。`);
+          console.log('[Desktop]: 即将调用mainWindow.loadURL...');
           await this.mainWindow.loadURL(`${serverInfo.url}/pro/login?reason=project_switched`);
+          console.log('[Desktop]: mainWindow.loadURL调用完成');
+          // 添加缺少的return语句
+          return serverInfo;
         }
       }
-      
+
+      // if(this.progressWindow){
+      //   this.progressWindow.webContents.send('progress-window-close');
+      // }
+      console.log('1123 加载项目完成', serverInfo);
       return serverInfo;
     } catch (error) {
       console.error('加载项目失败:', error);
@@ -948,6 +1419,7 @@ class HexoProDesktop {
         }
         
         await this.loadWebInterface();
+        console.log('1406web界面加载完成了返回数据');
         return true;
       }
       return false;
@@ -1085,6 +1557,12 @@ class HexoProDesktop {
       if (!this.mainWindow) throw new Error('主窗口不存在');
       if (!this.hexoServer) throw new Error('服务器未启动');
 
+      // 暂时禁用navigationTimeout，避免事件竞争
+      if (this.navigationTimeout) {
+        clearTimeout(this.navigationTimeout);
+        this.navigationTimeout = null;
+      }
+
       // 0. 首先清理可能存在的无效tokens
       console.log('[Desktop]: 步骤0: 清理无效tokens...');
       await this.cleanupInvalidTokens();
@@ -1121,16 +1599,26 @@ class HexoProDesktop {
 
         let pageLoadResolved = false;
         const waitForPageLoad = async () => {
-          return new Promise((resolve) => {
+          return new Promise((resolve, reject) => {
             const done = () => {
               if (!pageLoadResolved) {
                 pageLoadResolved = true;
                 resolve();
               }
             };
+            
+            // 添加超时机制
+            const timeout = setTimeout(() => {
+              if (!pageLoadResolved) {
+                pageLoadResolved = true;
+                console.warn('[Desktop]: 页面加载超时，继续执行');
+                resolve();
+              }
+            }, 10000); // 10秒超时
         
             this.mainWindow.webContents.once('did-finish-load', () => {
               console.log('[Desktop]: did-finish-load事件触发');
+              clearTimeout(timeout);
               done();
             });
             console.log('挂载dom-ready事件');
@@ -1139,6 +1627,7 @@ class HexoProDesktop {
               // 4. 注入localStorage拦截器
               console.log('[Desktop]: 步骤3: 注入localStorage拦截器...');
               await this.injectLocalStorageInterceptor();
+              clearTimeout(timeout);
               done();
             });
           });
@@ -1167,7 +1656,7 @@ class HexoProDesktop {
           
           // 不再自动跳转到主页，让前端来处理token验证和页面跳转
           console.log('[Desktop]: Token注入成功，等待前端处理token验证和页面跳转');
-          this.mainWindow.webContents.loadURL(webUrl);
+          await this.mainWindow.webContents.loadURL(webUrl);
         } else {
           console.log('[Desktop]: Token注入失败');
         }
@@ -1469,13 +1958,13 @@ class HexoProDesktop {
                     return response.json();
                   }).then(function(result) {
                     console.log('[Hexo Pro Desktop]: 保存token响应结果:', result);
-                    if (result.success) {
+                    if (result.success) {ƒ
                       console.log('[Hexo Pro Desktop]: Token已成功保存到桌面端AuthManager');
                     } else {
                       console.error('[Hexo Pro Desktop]: 保存token到桌面端失败:', result.message);
                     }
                   }).catch(function(error) {
-                    console.error('[Hexo Pro Desktop]: 保存token到桌面端请求出错:', error);
+                    console.error('[Hexo Pro Desktop]: 保存token到桌面端请求出错:', error);ƒ
                   });
                 }
               } catch (error) {
@@ -1548,12 +2037,12 @@ class HexoProDesktop {
 
       // 注入桌面端UI增强功能
       console.log('[Desktop]: 注入UI增强功能...');
-      await this.mainWindow.webContents.executeJavaScript(`
+      const result = await this.mainWindow.webContents.executeJavaScript(`
         (function() {
           // 避免重复添加
           if (document.querySelector('#desktop-enhancements')) {
             console.log('[Hexo Pro Desktop]: 桌面端功能已存在，跳过重复注入');
-            return;
+            return { success: true, message: '功能已存在' };
           }
           
           // 创建桌面端功能容器（用于标记这是桌面版本）
@@ -1601,12 +2090,17 @@ class HexoProDesktop {
           }
           
           console.log('[Hexo Pro Desktop]: 桌面端UI功能已注入');
+          return { success: true, message: '注入成功' };
         })();
       `);
+      
+      console.log('[Desktop]: 桌面端功能注入结果:', result);
+      console.log('[Desktop]: 桌面端功能注入完成');
 
     } catch (error) {
       console.error('[Desktop]: 注入桌面端功能失败:', error);
       // 不抛出错误，因为这不影响基本功能
+      console.log('[Desktop]: 桌面端功能注入失败，但继续执行');
     }
   }
 
@@ -1654,6 +2148,303 @@ class HexoProDesktop {
     } catch (error) {
       console.error('[Desktop]: 清理token过程中发生异常:', error);
       return false;
+    }
+  }
+
+  // 带进度的项目创建
+  async createProjectWithProgress(projectPath, projectName) {
+    const progressWindow = new BrowserWindow({
+      width: 500,
+      height: 600,
+      resizable: false,
+      modal: true,
+      parent: this.mainWindow,
+      webPreferences: {
+        nodeIntegration: true,
+        contextIsolation: false
+      },
+      title: '创建项目中...'
+    });
+
+    this.progressWindow = progressWindow;
+
+    const progressHtml = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <title>创建项目中...</title>
+        <style>
+          body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+          }
+          .container {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            height: calc(100vh - 40px);
+            box-sizing: border-box;
+          }
+          h2 {
+            margin-top: 0;
+            color: #333;
+            text-align: center;
+          }
+          .progress-info {
+            margin-bottom: 20px;
+          }
+          .current-step {
+            font-weight: 500;
+            color: #007acc;
+            margin-bottom: 10px;
+          }
+          .log-container {
+            background-color: #1e1e1e;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 4px;
+            height: 200px;
+            overflow-y: auto;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 12px;
+            line-height: 1.4;
+          }
+          .log-line {
+            margin-bottom: 5px;
+          }
+          .log-stdout {
+            color: #d4d4d4;
+          }
+          .log-stderr {
+            color: #f48771;
+          }
+          .log-info {
+            color: #4fc1ff;
+          }
+          .loading-spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #007acc;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+          }
+          @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+          }
+          .success-message {
+            color: #28a745;
+            font-weight: 500;
+            text-align: center;
+            margin-top: 20px;
+          }
+          .error-message {
+            color: #dc3545;
+            font-weight: 500;
+            text-align: center;
+            margin-top: 20px;
+          }
+          .buttons {
+            display: flex;
+            justify-content: center;
+            margin-top: 20px;
+          }
+          button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            background-color: #007acc;
+            color: white;
+          }
+          button:hover {
+            background-color: #0056b3;
+          }
+          button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <h2>创建 Hexo 项目</h2>
+          <div class="progress-info">
+            <div class="current-step" id="currentStep">
+              <span class="loading-spinner"></span>
+              正在准备创建项目...
+            </div>
+          </div>
+          <div class="log-container" id="logContainer"></div>
+          <div id="resultMessage"></div>
+        </div>
+
+        <script>
+          const { ipcRenderer } = require('electron');
+          const logContainer = document.getElementById('logContainer');
+          const currentStep = document.getElementById('currentStep');
+          const resultMessage = document.getElementById('resultMessage');
+          const buttonsContainer = document.getElementById('buttonsContainer');
+
+          function addLog(message, type = 'info') {
+            const logLine = document.createElement('div');
+            logLine.className = \`log-line log-\${type}\`;
+            logLine.textContent = new Date().toLocaleTimeString() + ' - ' + message;
+            logContainer.appendChild(logLine);
+            logContainer.scrollTop = logContainer.scrollHeight;
+          }
+
+          function updateStep(step) {
+            currentStep.innerHTML = '<span class="loading-spinner"></span>' + step;
+          }
+
+          function showResult(success, message) {
+            currentStep.innerHTML = success ? '✅ 创建完成' : '❌ 创建失败';
+            resultMessage.innerHTML = \`<div class="\${success ? 'success' : 'error'}-message">\${message}</div>\`;
+            buttonsContainer.style.display = 'block';
+          }
+
+          function closeWindow() {
+            ipcRenderer.send('close-progress-window');
+          }
+
+          // 接收进度更新
+          ipcRenderer.on('progress-update', (event, data) => {
+            if (data.step) {
+              updateStep(data.step);
+            }
+            if (data.log) {
+              addLog(data.log, data.logType || 'info');
+            }
+            if (data.result) {
+              showResult(data.result.success, data.result.message);
+            }
+          });
+
+          // 窗口关闭时清理
+          window.addEventListener('beforeunload', () => {
+            ipcRenderer.send('close-progress-window');
+          });
+        </script>
+      </body>
+      </html>
+    `;
+
+    progressWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(progressHtml)}`);
+
+    // 开始创建项目
+    try {
+      await this.performProjectCreation(projectPath, projectName, progressWindow);
+    } catch (error) {
+      console.error('[创建项目]: 项目创建过程中出错:', error);
+      progressWindow.webContents.send('progress-update', {
+        result: {
+          success: false,
+          message: `创建项目失败: ${error.message}`
+        }
+      });
+    }
+
+    // 处理窗口关闭
+    // const { ipcMain } = require('electron');
+    const closeHandler = () => {
+      ipcMain.removeListener('close-progress-window', closeHandler);
+      console.log('[创建项目]: 窗口关闭');
+      if (!progressWindow.isDestroyed()) {
+        progressWindow.close();
+      }
+    };
+    ipcMain.on('close-progress-window', closeHandler);
+
+    progressWindow.on('closed', () => {
+      ipcMain.removeListener('close-progress-window', closeHandler);
+    });
+  }
+
+  // 执行实际的项目创建
+  async performProjectCreation(projectPath, projectName, progressWindow) {
+    const sendProgress = (step, log, logType) => {
+      if (!progressWindow.isDestroyed()) {
+        progressWindow.webContents.send('progress-update', { step, log, logType });
+      }
+    };
+
+    try {
+      // 步骤1: 初始化Hexo项目
+      sendProgress('正在初始化 Hexo 项目...', `开始初始化项目: ${projectName}`);
+      
+      await this.executeCommand(`hexo init ${projectName}`, path.dirname(projectPath), (output) => {
+        sendProgress(null, output.data.trim(), output.type === 'stderr' ? 'stderr' : 'stdout');
+      });
+
+      sendProgress('Hexo 项目初始化完成', 'Hexo 项目结构创建成功');
+
+      // 步骤2: 安装依赖
+      sendProgress('正在安装项目依赖...', '开始安装 npm 依赖');
+      
+      await this.executeCommand('npm install', projectPath, (output) => {
+        sendProgress(null, output.data.trim(), output.type === 'stderr' ? 'stderr' : 'stdout');
+      });
+
+      sendProgress('依赖安装完成', 'npm 依赖安装成功');
+
+      // 步骤3: 验证项目
+      sendProgress('正在验证项目...', '验证项目结构');
+      
+      const validation = await this.validateHexoProject(projectPath);
+      if (!validation.isValid) {
+        throw new Error(`项目验证失败: ${validation.message}`);
+      }
+
+      sendProgress('项目验证完成', '项目结构验证通过');
+
+      // 步骤4: 加载项目
+      sendProgress('正在加载项目...', '启动项目服务');
+      console.log('[创建项目]: 即将调用loadProject方法，项目路径:', projectPath);
+      
+      await this.loadProject(projectPath);
+      
+      console.log('[创建项目]: loadProject方法调用完成，继续后续步骤');
+      sendProgress('项目创建完成', '项目已成功创建并加载');
+
+      // 发送成功结果
+      if (!progressWindow.isDestroyed()) {
+        console.log('[创建项目]: 发送成功结果到进度窗口');
+        progressWindow.webContents.send('progress-update', {
+          result: {
+            success: true,
+            message: `项目 "${projectName}" 创建成功！\n路径: ${projectPath}`
+          }
+        });
+        console.log('[创建项目]: 成功结果已发送');
+        progressWindow.close();
+      } else {
+        console.log('[创建项目]: 进度窗口已销毁，跳过发送成功结果');
+      }
+
+    } catch (error) {
+      console.error('[创建项目]: 项目创建失败:', error);
+      
+      // 清理失败的项目目录
+      try {
+        if (await fs.pathExists(projectPath)) {
+          await fs.remove(projectPath);
+          sendProgress(null, '已清理失败的项目目录', 'info');
+        }
+      } catch (cleanupError) {
+        console.error('[创建项目]: 清理失败的项目目录时出错:', cleanupError);
+      }
+
+      throw error;
     }
   }
 }

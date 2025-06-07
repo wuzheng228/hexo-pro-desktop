@@ -8,6 +8,14 @@ const AuthManager = require('./auth-manager');
 
 const execAsync = promisify(exec);
 
+// Windows编码处理
+let iconv;
+try {
+  iconv = require('iconv-lite');
+} catch (error) {
+  console.warn('[Desktop]: iconv-lite不可用，Windows下可能出现中文乱码问题:', error.message);
+}
+
 // 对于Node.js < 18版本，需要安装node-fetch
 const fetch = (() => {
   try {
@@ -59,6 +67,58 @@ class HexoProDesktop {
       // AuthManager现在使用共享的store，不需要单独初始化
       await this.authManager.loadAuthData();
     });
+  }
+
+  // Windows编码处理工具方法
+  getWindowsCommandOptions() {
+    if (process.platform !== 'win32') {
+      return {};
+    }
+    
+    return {
+      env: {
+        ...process.env,
+        CHCP: '65001', // UTF-8代码页
+        PYTHONIOENCODING: 'utf-8',
+        LC_ALL: 'en_US.UTF-8'
+      },
+      encoding: 'utf8'
+    };
+  }
+
+  wrapWindowsCommand(command) {
+    if (process.platform === 'win32') {
+      return `chcp 65001 >nul 2>&1 && ${command}`;
+    }
+    return command;
+  }
+
+  processWindowsOutput(data) {
+    let output = data.toString('utf8');
+    
+    if (process.platform === 'win32' && iconv) {
+      try {
+        // 更智能的编码检测
+        // 1. 如果输出已经是有效的UTF-8中文，则不转换
+        if (/[\u4e00-\u9fa5]/.test(output)) {
+          return output;
+        }
+        
+        // 2. 如果包含非ASCII字符但没有中文，可能是GBK编码
+        if (/[^\x00-\x7F]/.test(output)) {
+          // 尝试用GBK解码
+          const gbkDecoded = iconv.decode(data, 'gbk');
+          // 如果解码后包含中文字符，说明原来确实是GBK编码
+          if (/[\u4e00-\u9fa5]/.test(gbkDecoded)) {
+            output = gbkDecoded;
+          }
+        }
+      } catch (e) {
+        console.warn('[编码处理]: 编码转换失败，使用原始输出', e.message);
+      }
+    }
+    
+    return output;
   }
 
   async initializeStore() {
@@ -368,9 +428,22 @@ class HexoProDesktop {
       errors: []
     };
 
+    // Windows下设置编码环境
+    const execOptions = {};
+    if (process.platform === 'win32') {
+      execOptions.env = {
+        ...process.env,
+        CHCP: '65001',
+        PYTHONIOENCODING: 'utf-8',
+        LC_ALL: 'en_US.UTF-8'
+      };
+      execOptions.encoding = 'utf8';
+    }
+
     try {
       console.log('[依赖检查]: 检查 npm...');
-      const npmResult = await execAsync('npm --version');
+      const npmCommand = process.platform === 'win32' ? 'chcp 65001 >nul 2>&1 && npm --version' : 'npm --version';
+      const npmResult = await execAsync(npmCommand, execOptions);
       results.npm = true;
       console.log('[依赖检查]: npm版本:', npmResult.stdout.trim());
     } catch (error) {
@@ -380,7 +453,8 @@ class HexoProDesktop {
 
     try {
       console.log('[依赖检查]: 检查 hexo-cli...');
-      const hexoResult = await execAsync('hexo --version');
+      const hexoCommand = process.platform === 'win32' ? 'chcp 65001 >nul 2>&1 && hexo --version' : 'hexo --version';
+      const hexoResult = await execAsync(hexoCommand, execOptions);
       results.hexoCli = true;
       console.log('[依赖检查]: hexo-cli版本:', hexoResult.stdout.trim().split('\n')[0]);
     } catch (error) {
@@ -396,17 +470,25 @@ class HexoProDesktop {
     return new Promise((resolve, reject) => {
       console.log(`[命令执行]: 在 ${workingDir} 执行: ${command}`);
       
-      const child = spawn(command, [], {
+      const actualCommand = this.wrapWindowsCommand(command);
+      const spawnOptions = {
         cwd: workingDir,
         shell: true,
-        stdio: ['pipe', 'pipe', 'pipe']
-      });
+        stdio: ['pipe', 'pipe', 'pipe'],
+        ...this.getWindowsCommandOptions(),
+        // Windows下额外设置
+        ...(process.platform === 'win32' && {
+          windowsHide: true
+        })
+      };
+      
+      const child = spawn(actualCommand, [], spawnOptions);
 
       let stdout = '';
       let stderr = '';
 
       child.stdout.on('data', (data) => {
-        const output = data.toString();
+        const output = this.processWindowsOutput(data);
         stdout += output;
         console.log(`[命令输出]: ${output.trim()}`);
         if (progressCallback) {
@@ -415,7 +497,7 @@ class HexoProDesktop {
       });
 
       child.stderr.on('data', (data) => {
-        const output = data.toString();
+        const output = this.processWindowsOutput(data);
         stderr += output;
         console.error(`[命令错误]: ${output.trim()}`);
         if (progressCallback) {

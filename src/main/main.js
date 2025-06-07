@@ -26,6 +26,7 @@ class HexoProDesktop {
   constructor() {
     this.mainWindow = null;
     this.progressWindow = null;
+    this.loadingWindow = null; // 添加加载窗口
     this.hexoServer = null;
     this.currentProjectPath = null;
     this.isDev = process.env.NODE_ENV === 'development';
@@ -45,6 +46,9 @@ class HexoProDesktop {
     // 添加窗口状态管理
     this.windowHidden = false;
     this.lastWindowState = null; // 用于保存窗口关闭前的状态
+    
+    // 添加项目加载状态管理
+    this.isProjectLoading = false;
     
     // 设置全局变量，供HexoProServer访问
     global.desktopAuthManager = this.authManager;
@@ -436,6 +440,8 @@ class HexoProDesktop {
   }
 
   createMenu() {
+    const isProjectLoading = this.isProjectLoading; // 获取当前加载状态
+    
     const template = [
       {
         label: '文件',
@@ -443,6 +449,7 @@ class HexoProDesktop {
           {
             label: '新建博客项目',
             accelerator: 'CmdOrCtrl+N',
+            enabled: !isProjectLoading, // 加载期间禁用
             click: () => {
               this.createNewProject();
             }
@@ -450,6 +457,7 @@ class HexoProDesktop {
           {
             label: '打开博客项目',
             accelerator: 'CmdOrCtrl+O',
+            enabled: !isProjectLoading, // 加载期间禁用
             click: () => {
               this.openProject();
             }
@@ -457,6 +465,7 @@ class HexoProDesktop {
           {
             label: '关闭当前项目',
             accelerator: 'CmdOrCtrl+W',
+            enabled: !isProjectLoading, // 加载期间禁用
             click: () => {
               this.closeProject();
             }
@@ -560,6 +569,11 @@ class HexoProDesktop {
 
     const menu = Menu.buildFromTemplate(template);
     Menu.setApplicationMenu(menu);
+  }
+
+  // 更新菜单状态
+  updateMenuState() {
+    this.createMenu(); // 重新创建菜单以更新禁用状态
   }
 
   async createNewProject() {
@@ -1074,6 +1088,12 @@ class HexoProDesktop {
   }
 
   async openProject() {
+    // 防止重复操作
+    if (this.isProjectLoading) {
+      console.log('[打开项目]: 项目正在加载中，忽略重复操作');
+      return;
+    }
+
     const result = await dialog.showOpenDialog(this.mainWindow, {
       properties: ['openDirectory'],
       title: '选择 Hexo 博客项目目录'
@@ -1089,7 +1109,17 @@ class HexoProDesktop {
         return;
       }
       
-      await this.loadProject(projectPath);
+      // 显示加载窗口并加载项目
+      this.showProjectLoadingWindow(projectPath);
+      
+      try {
+        await this.loadProject(projectPath);
+      } catch (error) {
+        console.error('[打开项目]: 加载项目失败:', error);
+        // 确保在出错时也隐藏加载窗口
+        this.hideProjectLoadingWindow();
+        throw error;
+      }
     }
   }
 
@@ -1180,7 +1210,12 @@ class HexoProDesktop {
     try {
       console.log('准备加载项目:', projectPath);
       
-      // 验证是否是有效的 Hexo 项目
+      // 设置加载状态
+      this.isProjectLoading = true;
+      this.updateMenuState(); // 更新菜单状态
+      
+      // 步骤1: 验证项目
+      this.updateLoadingStep(1, false);
       const validation = await this.validateHexoProject(projectPath);
       if (!validation.isValid) {
         const errorMessage = `无法加载项目: ${validation.message}`;
@@ -1188,6 +1223,7 @@ class HexoProDesktop {
         dialog.showErrorBox('无效的 Hexo 项目', validation.message);
         throw new Error(errorMessage);
       }
+      this.updateLoadingStep(1, true);
       
       console.log('Hexo 项目验证通过，继续加载');
       
@@ -1214,8 +1250,16 @@ class HexoProDesktop {
           const response = await fetch(`${serverUrl}/hexopro/api/desktop/status`);
           if (response.ok) {
             console.log('项目已加载且服务器运行正常，无需重启');
+            this.updateLoadingStep(4, false);
             await this.loadWebInterface();
+            this.updateLoadingStep(4, true);
             console.log('1022web界面加载完成了返回数据');
+            
+            // 隐藏加载窗口
+            this.hideProjectLoadingWindow();
+            this.isProjectLoading = false;
+            this.updateMenuState(); // 更新菜单状态
+            
             return { url: serverUrl, port: this.hexoServer.getPort() };
           }
         } catch (error) {
@@ -1223,7 +1267,8 @@ class HexoProDesktop {
         }
       }
       
-      // 停止现有服务器（包括静态服务器和任何已有的Hexo服务器）
+      // 步骤2: 停止现有服务器
+      this.updateLoadingStep(2, false);
       if (this.hexoServer) {
         console.log('停止现有服务器...');
         try {
@@ -1236,10 +1281,12 @@ class HexoProDesktop {
           await new Promise(resolve => setTimeout(resolve, 2000));
         }
       }
+      this.updateLoadingStep(2, true);
       
       this.currentProjectPath = projectPath;
       
-      // 创建新的服务器实例
+      // 步骤3: 启动新服务器
+      this.updateLoadingStep(3, false);
       console.log('创建新的服务器实例...');
       this.hexoServer = new HexoProServer(projectPath);
       
@@ -1284,6 +1331,7 @@ class HexoProDesktop {
       if (!serverInfo) {
         throw new Error('服务器启动失败，已达到最大重试次数');
       }
+      this.updateLoadingStep(3, true);
       
       // 保存项目路径
       this.safeStoreSet('lastProjectPath', projectPath);
@@ -1291,11 +1339,19 @@ class HexoProDesktop {
       // 等待服务器完全启动
       await this.waitForServer(serverInfo.url);
       
-      // 直接加载 Web 界面（让hexo-pro自己处理登录）
+      // 步骤4: 加载Web界面
+      this.updateLoadingStep(4, false);
       console.log('[Desktop]: 即将调用loadWebInterface方法...');
       await this.loadWebInterface();
       console.log('[Desktop]: loadWebInterface方法调用完成');
-       console.log('1100web界面加载完成了返回数据');
+      this.updateLoadingStep(4, true);
+      
+      // 隐藏加载窗口
+      this.hideProjectLoadingWindow();
+      this.isProjectLoading = false;
+      this.updateMenuState(); // 更新菜单状态
+      
+      console.log('1100web界面加载完成了返回数据');
       // 通知渲染进程项目已加载（如果当前在主页）
       if (this.mainWindow) {
         console.log('[Desktop]: mainWindow存在，开始检查URL...');
@@ -1329,6 +1385,11 @@ class HexoProDesktop {
       return serverInfo;
     } catch (error) {
       console.error('加载项目失败:', error);
+      
+      // 隐藏加载窗口
+      this.hideProjectLoadingWindow();
+      this.isProjectLoading = false;
+      this.updateMenuState(); // 更新菜单状态
       
       // 清理失败的服务器实例
       if (this.hexoServer) {
@@ -1503,6 +1564,12 @@ class HexoProDesktop {
     try {
       console.log('开始清理资源...');
       
+      // 设置加载状态为false
+      this.isProjectLoading = false;
+      
+      // 清理加载窗口
+      this.hideProjectLoadingWindow();
+      
       // 清理导航相关的状态
       this.isLoadingWebInterface = false;
       this.lastTokenInjected = null;
@@ -1547,17 +1614,24 @@ class HexoProDesktop {
     ipcMain.handle('get-project-info', () => {
       return {
         projectPath: this.safeStoreGet('lastProjectPath'),
-        serverUrl: this.hexoServer ? this.hexoServer.getUrl() : null
+        serverUrl: this.hexoServer ? this.hexoServer.getUrl() : null,
+        isLoading: this.isProjectLoading // 添加加载状态
       };
     });
 
     // 打开项目
     ipcMain.handle('open-project', async () => {
+      if (this.isProjectLoading) {
+        throw new Error('项目正在加载中，请稍候再试');
+      }
       await this.openProject();
     });
 
     // 创建项目
     ipcMain.handle('create-project', async () => {
+      if (this.isProjectLoading) {
+        throw new Error('项目正在加载中，请稍候再试');
+      }
       await this.createNewProject();
     });
 
@@ -1606,6 +1680,11 @@ class HexoProDesktop {
 
     // 加载Web管理界面
     ipcMain.handle('load-web-interface', async () => {
+      if (this.isProjectLoading) {
+        console.log('[IPC]: 项目正在加载中，跳过Web界面加载请求');
+        return false;
+      }
+      
       if (this.hexoServer && this.currentProjectPath) {
         // 避免重复调用
         if (this.isLoadingWebInterface) {
@@ -1636,9 +1715,23 @@ class HexoProDesktop {
 
   async closeProject() {
     try {
+      // 防止重复操作
+      if (this.isProjectLoading) {
+        console.log('[关闭项目]: 项目正在加载中，忽略关闭操作');
+        return;
+      }
+      
+      // 设置加载状态
+      this.isProjectLoading = true;
+      this.updateMenuState(); // 更新菜单状态
+      
+      // 显示关闭项目的加载窗口
+      this.showProjectClosingWindow();
+      
       console.log('正在关闭当前项目...');
       
-      // 停止当前的 Hexo Pro 服务器
+      // 步骤1: 停止当前的 Hexo Pro 服务器
+      this.updateLoadingStep(1, false);
       if (this.hexoServer) {
         try {
           await this.hexoServer.stop();
@@ -1650,12 +1743,14 @@ class HexoProDesktop {
           await new Promise(resolve => setTimeout(resolve, 2000));
         }
       }
+      this.updateLoadingStep(1, true);
 
       // 清除保存的项目路径
       this.safeStoreDelete('lastProjectPath');
       this.currentProjectPath = null;
 
-      // 启动静态服务器，包含重试机制
+      // 步骤2: 启动静态服务器，包含重试机制
+      this.updateLoadingStep(2, false);
       console.log('启动静态服务器...');
       this.hexoServer = new HexoProServer(null);
       
@@ -1690,12 +1785,25 @@ class HexoProDesktop {
           }
         }
       }
+      this.updateLoadingStep(2, true);
 
-      // 返回主页界面
+      // 步骤3: 返回主页界面
+      this.updateLoadingStep(3, false);
       await this.returnToHome();
+      this.updateLoadingStep(3, true);
+      
+      // 隐藏加载窗口并更新状态
+      this.hideProjectLoadingWindow();
+      this.isProjectLoading = false;
+      this.updateMenuState(); // 更新菜单状态
 
     } catch (error) {
       console.error('关闭项目失败:', error);
+      
+      // 隐藏加载窗口
+      this.hideProjectLoadingWindow();
+      this.isProjectLoading = false;
+      this.updateMenuState(); // 更新菜单状态
       
       // 错误处理：强制清理并显示错误
       if (this.hexoServer) {
@@ -2641,6 +2749,338 @@ class HexoProDesktop {
 
       throw error;
     }
+  }
+
+  // 显示项目加载窗口
+  showProjectLoadingWindow(projectPath) {
+    if (this.loadingWindow && !this.loadingWindow.isDestroyed()) {
+      return; // 如果已经存在加载窗口，直接返回
+    }
+
+    this.loadingWindow = new BrowserWindow({
+      width: 400,
+      height: 500,
+      resizable: false,
+      modal: true,
+      parent: this.mainWindow,
+      webPreferences: {
+        nodeIntegration: true,
+        contextIsolation: false
+      },
+      title: '加载项目中...',
+      frame: false,
+      transparent: true,
+      alwaysOnTop: true
+    });
+
+    const projectName = path.basename(projectPath);
+    const loadingHtml = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <title>加载项目中...</title>
+        <style>
+          body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            margin: 0;
+            padding: 0;
+            background: transparent;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+          }
+          .loading-container {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 12px;
+            padding: 30px;
+            text-align: center;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            min-width: 300px;
+          }
+          .loading-spinner {
+            width: 50px;
+            height: 50px;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #007acc;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px auto;
+          }
+          @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+          }
+          .loading-title {
+            font-size: 18px;
+            font-weight: 500;
+            color: #333;
+            margin-bottom: 10px;
+          }
+          .loading-subtitle {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 5px;
+          }
+          .project-name {
+            font-size: 16px;
+            font-weight: 500;
+            color: #007acc;
+            word-break: break-all;
+          }
+          .loading-steps {
+            margin-top: 20px;
+            font-size: 12px;
+            color: #888;
+            text-align: left;
+          }
+          .step {
+            margin: 5px 0;
+            padding-left: 20px;
+            position: relative;
+          }
+          .step.active::before {
+            content: '→';
+            position: absolute;
+            left: 0;
+            color: #007acc;
+            font-weight: bold;
+          }
+          .step.completed::before {
+            content: '✓';
+            position: absolute;
+            left: 0;
+            color: #28a745;
+            font-weight: bold;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="loading-container">
+          <div class="loading-spinner"></div>
+          <div class="loading-title">正在加载项目</div>
+          <div class="loading-subtitle">项目名称：</div>
+          <div class="project-name">${projectName}</div>
+          <div class="loading-steps">
+            <div class="step active" id="step1">验证项目结构</div>
+            <div class="step" id="step2">停止现有服务</div>
+            <div class="step" id="step3">启动项目服务</div>
+            <div class="step" id="step4">加载Web界面</div>
+          </div>
+        </div>
+
+        <script>
+          const { ipcRenderer } = require('electron');
+          
+          let currentStep = 1;
+          
+          function updateStep(stepNumber, completed = false) {
+            if (stepNumber > currentStep) {
+              // 标记之前的步骤为完成
+              for (let i = 1; i < stepNumber; i++) {
+                const step = document.getElementById('step' + i);
+                if (step) {
+                  step.className = 'step completed';
+                }
+              }
+              currentStep = stepNumber;
+            }
+            
+            const step = document.getElementById('step' + stepNumber);
+            if (step) {
+              step.className = completed ? 'step completed' : 'step active';
+            }
+          }
+          
+          // 接收步骤更新
+          ipcRenderer.on('loading-step-update', (event, stepNumber, completed) => {
+            updateStep(stepNumber, completed);
+          });
+          
+          // 窗口关闭时清理
+          window.addEventListener('beforeunload', () => {
+            ipcRenderer.removeAllListeners('loading-step-update');
+          });
+        </script>
+      </body>
+      </html>
+    `;
+
+    this.loadingWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHtml)}`);
+    
+    // 窗口关闭时清理
+    this.loadingWindow.on('closed', () => {
+      this.loadingWindow = null;
+    });
+  }
+
+  // 更新加载步骤
+  updateLoadingStep(stepNumber, completed = false) {
+    if (this.loadingWindow && !this.loadingWindow.isDestroyed()) {
+      this.loadingWindow.webContents.send('loading-step-update', stepNumber, completed);
+    }
+  }
+
+  // 隐藏项目加载窗口
+  hideProjectLoadingWindow() {
+    if (this.loadingWindow && !this.loadingWindow.isDestroyed()) {
+      this.loadingWindow.close();
+    }
+    this.loadingWindow = null;
+  }
+
+  // 显示项目关闭加载窗口
+  showProjectClosingWindow() {
+    if (this.loadingWindow && !this.loadingWindow.isDestroyed()) {
+      return; // 如果已经存在加载窗口，直接返回
+    }
+
+    this.loadingWindow = new BrowserWindow({
+      width: 400,
+      height: 250,
+      resizable: false,
+      modal: true,
+      parent: this.mainWindow,
+      webPreferences: {
+        nodeIntegration: true,
+        contextIsolation: false
+      },
+      title: '关闭项目中...',
+      frame: false,
+      transparent: true,
+      alwaysOnTop: true
+    });
+
+    const loadingHtml = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <title>关闭项目中...</title>
+        <style>
+          body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            margin: 0;
+            padding: 0;
+            background: transparent;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+          }
+          .loading-container {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 12px;
+            padding: 30px;
+            text-align: center;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            min-width: 300px;
+          }
+          .loading-spinner {
+            width: 50px;
+            height: 50px;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #dc3545;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px auto;
+          }
+          @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+          }
+          .loading-title {
+            font-size: 18px;
+            font-weight: 500;
+            color: #333;
+            margin-bottom: 20px;
+          }
+          .loading-steps {
+            margin-top: 20px;
+            font-size: 12px;
+            color: #888;
+            text-align: left;
+          }
+          .step {
+            margin: 5px 0;
+            padding-left: 20px;
+            position: relative;
+          }
+          .step.active::before {
+            content: '→';
+            position: absolute;
+            left: 0;
+            color: #dc3545;
+            font-weight: bold;
+          }
+          .step.completed::before {
+            content: '✓';
+            position: absolute;
+            left: 0;
+            color: #28a745;
+            font-weight: bold;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="loading-container">
+          <div class="loading-spinner"></div>
+          <div class="loading-title">正在关闭项目</div>
+          <div class="loading-steps">
+            <div class="step active" id="step1">停止项目服务</div>
+            <div class="step" id="step2">启动主页服务</div>
+            <div class="step" id="step3">返回主页面</div>
+          </div>
+        </div>
+
+        <script>
+          const { ipcRenderer } = require('electron');
+          
+          let currentStep = 1;
+          
+          function updateStep(stepNumber, completed = false) {
+            if (stepNumber > currentStep) {
+              // 标记之前的步骤为完成
+              for (let i = 1; i < stepNumber; i++) {
+                const step = document.getElementById('step' + i);
+                if (step) {
+                  step.className = 'step completed';
+                }
+              }
+              currentStep = stepNumber;
+            }
+            
+            const step = document.getElementById('step' + stepNumber);
+            if (step) {
+              step.className = completed ? 'step completed' : 'step active';
+            }
+          }
+          
+          // 接收步骤更新
+          ipcRenderer.on('loading-step-update', (event, stepNumber, completed) => {
+            updateStep(stepNumber, completed);
+          });
+          
+          // 窗口关闭时清理
+          window.addEventListener('beforeunload', () => {
+            ipcRenderer.removeAllListeners('loading-step-update');
+          });
+        </script>
+      </body>
+      </html>
+    `;
+
+    this.loadingWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHtml)}`);
+    
+    // 窗口关闭时清理
+    this.loadingWindow.on('closed', () => {
+      this.loadingWindow = null;
+    });
   }
 }
 

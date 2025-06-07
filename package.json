@@ -1,6 +1,6 @@
 {
   "name": "hexo-pro-desktop",
-  "version": "1.0.0",
+  "version": "1.0.0-beta.1",
   "description": "Hexo Pro 桌面客户端 - 一个基于 Electron 的 Hexo 博客管理工具",
   "main": "src/main/main.js",
   "scripts": {
@@ -11,6 +11,10 @@
     "build:react": "echo '前端资源由父项目构建，跳过此步骤'",
     "build:electron": "electron-builder",
     "dist": "yarn build && electron-builder --publish=never",
+    "dist:all": "yarn build && electron-builder --mac --win --linux --publish=never",
+    "dist:mac": "yarn build && electron-builder --mac --publish=never",
+    "dist:win": "yarn build && electron-builder --win --publish=never",
+    "dist:linux": "yarn build && electron-builder --linux --publish=never",
     "pack": "electron-builder --dir",
     "copy-core": "node scripts/copy-hexo-pro.js",
     "postinstall": "electron-builder install-app-deps",
@@ -88,15 +92,39 @@
     ],
     "mac": {
       "icon": "assets/icon.icns",
-      "category": "public.app-category.productivity"
+      "category": "public.app-category.productivity",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["universal"]
+        },
+        {
+          "target": "dmg", 
+          "arch": ["arm64"]
+        },
+        {
+          "target": "dmg",
+          "arch": ["x64"]
+        }
+      ]
     },
     "win": {
       "icon": "assets/icon.ico",
-      "target": "nsis"
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64", "ia32"]
+        }
+      ]
     },
     "linux": {
       "icon": "assets/icon.png",
-      "target": "AppImage"
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": ["x64"]
+        }
+      ]
     },
     "nsis": {
       "oneClick": false,

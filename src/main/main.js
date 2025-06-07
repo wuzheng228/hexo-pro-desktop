@@ -1440,7 +1440,7 @@ class HexoProDesktop {
       type: 'info',
       title: '关于 Hexo Pro Desktop',
       message: 'Hexo Pro Desktop',
-      detail: `版本: ${app.getVersion()}\n基于 Electron 的 Hexo 博客管理工具\n\n© 2024 wuzheng`,
+      detail: `版本: ${app.getVersion()}\n基于 Electron 的 Hexo 博客管理工具\n\n© 2025 warms`,
       buttons: ['确定']
     });
   }

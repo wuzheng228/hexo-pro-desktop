@@ -59,24 +59,67 @@ class HexoProServer {
       // 先注册Hexo插件（在服务器启动前）
       await this.registerHexoPlugin();
       
-      // 先尝试找到可用端口，优先使用4000
-      const availablePort = await this.findAvailablePort(4000);
-      this.hexoPort = availablePort;
+      // 改进的端口选择逻辑，包含错误处理
+      let availablePort;
+      let attempts = 0;
+      const maxAttempts = 3;
       
-      console.log(`[Hexo Server]: 使用端口 ${this.hexoPort}`);
+      while (attempts < maxAttempts) {
+        try {
+          console.log(`[Hexo Server]: 第 ${attempts + 1} 次尝试寻找可用端口...`);
+          availablePort = await this.findAvailablePort(4000);
+          break;
+        } catch (error) {
+          attempts++;
+          console.error(`[Hexo Server]: 端口选择失败 (尝试 ${attempts}/${maxAttempts}):`, error.message);
+          
+          if (attempts >= maxAttempts) {
+            // 最后一次尝试：使用完全动态的端口
+            console.log('[Hexo Server]: 所有预定义端口都失败，尝试完全动态端口分配');
+            try {
+              availablePort = await this.findDynamicPort();
+              break;
+            } catch (dynamicError) {
+              throw new Error(`端口分配完全失败: ${error.message} | 动态端口错误: ${dynamicError.message}`);
+            }
+          } else {
+            // 等待一段时间后重试
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        }
+      }
+      
+      this.hexoPort = availablePort;
+      console.log(`[Hexo Server]: 最终使用端口 ${this.hexoPort}`);
       
       // 启动 Hexo 内置服务器
       this.hexoServer = await this.hexoInstance.call('server', {
         port: this.hexoPort,
+        ip: '127.0.0.1', // 明确指定localhost，避免权限问题
         open: false,
         watch: true,
         draft: false,
         log: false // 减少日志输出
       });
       
-      console.log(`[Hexo Server]: 集成的 Hexo 服务器已启动在端口 ${this.hexoPort}`);
+      console.log(`[Hexo Server]: 集成的 Hexo 服务器已启动在 127.0.0.1:${this.hexoPort}`);
     } catch (error) {
       console.error('[Hexo Server]: 启动集成的 Hexo 服务器失败:', error);
+      
+      // 提供更友好的错误信息
+      if (error.message.includes('EACCES') || error.message.includes('权限被拒绝')) {
+        const enhancedError = new Error(
+          `端口权限被拒绝。这通常在Windows系统上发生。\n` +
+          `建议解决方案：\n` +
+          `1. 以管理员身份运行应用\n` +
+          `2. 检查防火墙设置\n` +
+          `3. 确保没有其他应用占用端口\n` +
+          `原始错误: ${error.message}`
+        );
+        enhancedError.code = 'PORT_PERMISSION_DENIED';
+        throw enhancedError;
+      }
+      
       throw error;
     }
   }
@@ -190,23 +233,109 @@ class HexoProServer {
   }
 
   async findAvailablePort(startPort) {
-    for (let port = startPort; port < startPort + 100; port++) {
-      if (await this.isPortAvailable(port)) {
-        return port;
-      }
-    }
+    const os = require('os');
+    const platform = os.platform();
     
-    throw new Error(`无法找到可用端口，从 ${startPort} 开始尝试了100个端口`);
+    // Windows系统的端口选择策略
+    if (platform === 'win32') {
+      console.log('[Hexo Server]: 检测到Windows系统，使用优化的端口选择策略');
+      
+      // Windows上优先尝试用户端口范围(1024-65535)
+      // 避免系统保留端口和需要管理员权限的端口
+      const safePorts = [
+        4000, 4001, 4002, 4003, 4004, 4005, // 首选的端口
+        3000, 3001, 3002, 3003, 3004, 3005, // 备选端口
+        8000, 8001, 8002, 8003, 8004, 8005, // 高端口
+        5000, 5001, 5002, 5003, 5004, 5005  // 其他常用端口
+      ];
+      
+      // 先尝试预定义的安全端口
+      for (const port of safePorts) {
+        try {
+          console.log(`[Hexo Server]: Windows - 尝试端口 ${port}`);
+          if (await this.isPortAvailableWithPermissionCheck(port)) {
+            console.log(`[Hexo Server]: Windows - 端口 ${port} 可用且有权限`);
+            return port;
+          }
+        } catch (error) {
+          console.log(`[Hexo Server]: Windows - 端口 ${port} 不可用: ${error.message}`);
+          continue;
+        }
+      }
+      
+      // 如果预定义端口都不可用，尝试动态分配
+      console.log('[Hexo Server]: Windows - 预定义端口都不可用，尝试动态分配');
+      return await this.findDynamicPort();
+    } else {
+      // 非Windows系统保持原有逻辑
+      console.log(`[Hexo Server]: 检测到${platform}系统，使用标准端口选择策略`);
+      for (let port = startPort; port < startPort + 100; port++) {
+        if (await this.isPortAvailable(port)) {
+          return port;
+        }
+      }
+      
+      throw new Error(`无法找到可用端口，从 ${startPort} 开始尝试了100个端口`);
+    }
+  }
+
+  async isPortAvailableWithPermissionCheck(port) {
+    return new Promise((resolve, reject) => {
+      const server = net.createServer();
+      
+      server.on('error', (error) => {
+        if (error.code === 'EACCES') {
+          console.log(`[Hexo Server]: 端口 ${port} 权限被拒绝 (EACCES)`);
+          reject(new Error(`端口 ${port} 权限被拒绝`));
+        } else if (error.code === 'EADDRINUSE') {
+          console.log(`[Hexo Server]: 端口 ${port} 已被占用 (EADDRINUSE)`);
+          resolve(false);
+        } else {
+          console.log(`[Hexo Server]: 端口 ${port} 其他错误: ${error.code} - ${error.message}`);
+          resolve(false);
+        }
+      });
+      
+      server.listen(port, '127.0.0.1', () => {
+        server.close(() => {
+          console.log(`[Hexo Server]: 端口 ${port} 测试成功`);
+          resolve(true);
+        });
+      });
+    });
+  }
+
+  async findDynamicPort() {
+    console.log('[Hexo Server]: 尝试使用系统分配的动态端口');
+    
+    return new Promise((resolve, reject) => {
+      const server = net.createServer();
+      
+      server.listen(0, '127.0.0.1', () => {
+        const port = server.address().port;
+        server.close(() => {
+          console.log(`[Hexo Server]: 系统分配的动态端口: ${port}`);
+          resolve(port);
+        });
+      });
+      
+      server.on('error', (error) => {
+        console.error('[Hexo Server]: 动态端口分配失败:', error);
+        reject(error);
+      });
+    });
   }
 
   async isPortAvailable(port) {
     return new Promise((resolve) => {
       const server = net.createServer();
-      server.listen(port, () => {
+      
+      server.listen(port, '127.0.0.1', () => {
         server.close(() => {
           resolve(true);
         });
       });
+      
       server.on('error', () => {
         resolve(false);
       });
@@ -752,26 +881,65 @@ class HexoProServer {
 
   async startBasicServer() {
     return new Promise((resolve, reject) => {
-      console.log(`尝试在端口 ${this.hexoPort} 启动基本服务器...`);
+      const os = require('os');
+      const platform = os.platform();
       
-      const tryStart = (port) => {
-        this.server = this.app.listen(port, (err) => {
-          if (err) {
-            if (err.code === 'EADDRINUSE' && port - this.hexoPort < 10) {
-              console.log(`端口 ${port} 被占用，尝试端口 ${port + 1}`);
-              tryStart(port + 1);
+      const startServerWithPort = async (port) => {
+        return new Promise((resolvePort, rejectPort) => {
+          console.log(`[Hexo Server]: 尝试在端口 ${port} 启动基本服务器...`);
+          
+          // Windows系统特殊处理
+          const serverOptions = platform === 'win32' ? {
+            host: '127.0.0.1' // Windows上明确使用localhost
+          } : {};
+          
+          this.server = this.app.listen(port, serverOptions.host, (err) => {
+            if (err) {
+              rejectPort(err);
             } else {
-              reject(err);
+              this.hexoPort = port;
+              console.log(`[Hexo Server]: 基本服务器成功启动在 ${serverOptions.host || '0.0.0.0'}:${port}`);
+              resolvePort();
             }
-          } else {
-            this.hexoPort = port;
-            console.log(`基本服务器成功启动在端口 ${port}`);
-            resolve();
-          }
+          });
+          
+          this.server.on('error', (err) => {
+            rejectPort(err);
+          });
         });
       };
-
-      tryStart(this.hexoPort);
+      
+      const tryStartWithFallback = async () => {
+        try {
+          // 先尝试找到可用端口
+          const availablePort = await this.findAvailablePort(this.hexoPort);
+          await startServerWithPort(availablePort);
+          resolve();
+        } catch (error) {
+          console.error('[Hexo Server]: 启动基本服务器失败:', error);
+          
+          if (error.message.includes('EACCES') || error.message.includes('权限被拒绝')) {
+            // 权限错误的特殊处理
+            try {
+              console.log('[Hexo Server]: 端口权限问题，尝试动态端口...');
+              const dynamicPort = await this.findDynamicPort();
+              await startServerWithPort(dynamicPort);
+              resolve();
+            } catch (dynamicError) {
+              reject(new Error(
+                `无法启动服务器: 端口权限被拒绝。\n` +
+                `建议以管理员身份运行应用或检查防火墙设置。\n` +
+                `原始错误: ${error.message}\n` +
+                `动态端口错误: ${dynamicError.message}`
+              ));
+            }
+          } else {
+            reject(error);
+          }
+        }
+      };
+      
+      tryStartWithFallback();
     });
   }
 }

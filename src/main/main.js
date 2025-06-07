@@ -621,17 +621,31 @@ class HexoProDesktop {
 
       // 4. 检查项目目录是否已存在
       if (await fs.pathExists(projectPath)) {
-        const overwriteResult = await dialog.showMessageBox(this.mainWindow, {
-          type: 'warning',
+        const overwriteResult = await this.showCustomConfirmDialog({
           title: '目录已存在',
           message: `目录 "${projectName}" 已存在`,
-          detail: '是否要覆盖现有目录？这将删除目录中的所有内容。',
-          buttons: ['取消', '覆盖'],
-          defaultId: 0,
-          cancelId: 0
+          detail: `是否要覆盖现有目录？这将删除目录中的所有内容。
+
+注意事项：
+• 此操作不可撤销
+• 目录中的所有文件和子目录都将被永久删除  
+• 请确保您不需要保留现有内容
+• 建议在操作前备份重要数据
+
+风险说明：
+- 覆盖后无法恢复原有数据
+- 如果目录中有重要文件，请先进行备份
+- 建议选择其他目录名称以避免冲突
+
+确认要继续吗？`,
+          confirmLabel: '覆盖',
+          cancelLabel: '取消',
+          width: 500,
+          height: 500,
+          type: 'warning'
         });
 
-        if (overwriteResult.response === 0) {
+        if (!overwriteResult.confirmed) {
           console.log('[创建项目]: 用户取消覆盖');
           return;
         }
@@ -655,7 +669,7 @@ class HexoProDesktop {
     return new Promise((resolve) => {
       const inputWindow = new BrowserWindow({
         width: 450,
-        height: 300,
+        height: 450,
         resizable: false,
         modal: true,
         parent: this.mainWindow,
@@ -874,6 +888,187 @@ class HexoProDesktop {
       inputWindow.on('closed', () => {
         ipcMain.removeListener('project-name-result', handler);
         resolve({ success: false });
+      });
+    });
+  }
+
+  // 显示自定义确认对话框
+  async showCustomConfirmDialog(options = {}) {
+    const {
+      title = '确认',
+      message = '',
+      detail = '',
+      confirmLabel = '确认',
+      cancelLabel = '取消',
+      width = 450,
+      height = 400,
+      type = 'warning'
+    } = options;
+
+    return new Promise((resolve) => {
+      const confirmWindow = new BrowserWindow({
+        width,
+        height,
+        resizable: false,
+        modal: true,
+        parent: this.mainWindow,
+        webPreferences: {
+          nodeIntegration: true,
+          contextIsolation: false
+        },
+        title
+      });
+
+      const iconMap = {
+        warning: '⚠️',
+        error: '❌',
+        info: 'ℹ️',
+        question: '❓'
+      };
+
+      const html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="UTF-8">
+          <title>${title}</title>
+          <style>
+            body {
+              font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+              margin: 0;
+              padding: 20px;
+              background-color: #f5f5f5;
+              height: calc(100vh - 40px);
+              box-sizing: border-box;
+              display: flex;
+              flex-direction: column;
+            }
+            .container {
+              background: white;
+              padding: 30px;
+              border-radius: 8px;
+              box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+              flex: 1;
+              display: flex;
+              flex-direction: column;
+            }
+            .header {
+              display: flex;
+              align-items: flex-start;
+              margin-bottom: 20px;
+            }
+            .icon {
+              font-size: 48px;
+              margin-right: 20px;
+              flex-shrink: 0;
+            }
+            .content {
+              flex: 1;
+            }
+            .message {
+              font-size: 16px;
+              font-weight: 500;
+              color: #333;
+              margin-bottom: 15px;
+              line-height: 1.4;
+            }
+            .detail {
+              font-size: 14px;
+              color: #666;
+              line-height: 1.6;
+              white-space: pre-line;
+              flex: 1;
+              overflow-y: auto;
+              padding: 10px;
+              background-color: #f8f9fa;
+              border-radius: 4px;
+              border: 1px solid #e9ecef;
+            }
+            .buttons {
+              display: flex;
+              gap: 10px;
+              justify-content: flex-end;
+              margin-top: 20px;
+              flex-shrink: 0;
+            }
+            button {
+              padding: 10px 20px;
+              border: none;
+              border-radius: 4px;
+              cursor: pointer;
+              font-size: 14px;
+              font-weight: 500;
+              min-width: 80px;
+            }
+            .btn-cancel {
+              background-color: #6c757d;
+              color: white;
+            }
+            .btn-cancel:hover {
+              background-color: #5a6268;
+            }
+            .btn-confirm {
+              background-color: #dc3545;
+              color: white;
+            }
+            .btn-confirm:hover {
+              background-color: #c82333;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="header">
+              <div class="icon">${iconMap[type] || iconMap.info}</div>
+              <div class="content">
+                <div class="message">${message}</div>
+              </div>
+            </div>
+            <div class="detail">${detail}</div>
+            <div class="buttons">
+              <button type="button" class="btn-cancel" onclick="cancel()">${cancelLabel}</button>
+              <button type="button" class="btn-confirm" onclick="confirm()">${confirmLabel}</button>
+            </div>
+          </div>
+
+          <script>
+            const { ipcRenderer } = require('electron');
+
+            function confirm() {
+              ipcRenderer.send('custom-confirm-result', { confirmed: true });
+            }
+
+            function cancel() {
+              ipcRenderer.send('custom-confirm-result', { confirmed: false });
+            }
+
+            // 键盘事件
+            document.addEventListener('keydown', function(e) {
+              if (e.key === 'Escape') {
+                cancel();
+              } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                confirm();
+              }
+            });
+          </script>
+        </body>
+        </html>
+      `;
+
+      confirmWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+
+      // 处理结果
+      const handler = (event, result) => {
+        ipcMain.removeListener('custom-confirm-result', handler);
+        confirmWindow.close();
+        resolve(result);
+      };
+
+      ipcMain.on('custom-confirm-result', handler);
+
+      confirmWindow.on('closed', () => {
+        ipcMain.removeListener('custom-confirm-result', handler);
+        resolve({ confirmed: false });
       });
     });
   }

@@ -32,6 +32,8 @@ class HexoProServer {
     this.hexoPort = 4000; // Hexo内置服务器端口（和hexo s默认端口一致）
     this.hexoInstance = null;
     this.isWatching = false;
+    this.originalNodePath = null; // 保存原始NODE_PATH
+    this.originalCwd = null; // 保存原始工作目录
   }
 
   async start() {
@@ -526,61 +528,233 @@ class HexoProServer {
   }
 
   async initHexo() {
-    // 动态引入 Hexo
-    const Hexo = require('hexo');
-
-    // 创建 Hexo 实例
-    this.hexoInstance = new Hexo(this.projectPath, {
-      debug: false,
-      safe: false,
-      silent: false,
-      config: path.join(this.projectPath, '_config.yml')
-    });
-
-    // 初始化 Hexo
-    await this.hexoInstance.init();
-
-    // 加载插件和主题
-    await this.hexoInstance.load();
-
-    // 将 hexo 实例设为全局变量，供插件使用
-    global.hexo = this.hexoInstance;
-
-    // 立即初始化数据库管理器
-    console.log('[Hexo Server]: 预初始化数据库管理器...');
+    // 保存原始工作目录
+    const originalCwd = process.cwd();
+    
     try {
-      await databaseManager.initialize(this.hexoInstance);
-      console.log('[Hexo Server]: 数据库管理器预初始化完成');
+      console.log('[Hexo Server]: 开始初始化 Hexo 实例...');
+      console.log('[Hexo Server]: 项目路径:', this.projectPath);
+      console.log('[Hexo Server]: 当前工作目录:', originalCwd);
+      
+      // 保存原始状态以便后续恢复
+      this.originalCwd = originalCwd;
+      this.originalNodePath = process.env.NODE_PATH;
+      
+      // 切换到项目目录 - 这是关键步骤，确保插件加载正确
+      process.chdir(this.projectPath);
+      console.log('[Hexo Server]: 已切换到项目目录:', process.cwd());
+      
+      // 确保项目的node_modules在模块解析路径中
+      const projectNodeModules = path.join(this.projectPath, 'node_modules');
+      if (!require.resolve.paths('').includes(projectNodeModules)) {
+        module.paths.unshift(projectNodeModules);
+        console.log('[Hexo Server]: 已添加项目node_modules到模块解析路径:', projectNodeModules);
+      }
+
+      // 设置NODE_PATH环境变量，确保全局模块解析
+      const currentNodePath = this.originalNodePath || '';
+      const newNodePath = currentNodePath ? 
+        `${projectNodeModules}${path.delimiter}${currentNodePath}` : 
+        projectNodeModules;
+      
+      process.env.NODE_PATH = newNodePath;
+      console.log('[Hexo Server]: 已设置NODE_PATH:', newNodePath);
+      
+      // 重新加载模块路径（这对于某些插件加载非常重要）
+      if (require.cache) {
+        // 清理模块缓存中可能存在的旧Hexo实例
+        Object.keys(require.cache).forEach(key => {
+          if (key.includes('hexo') && !key.includes('hexo-pro')) {
+            delete require.cache[key];
+          }
+        });
+      }
+
+      // 动态引入 Hexo
+      const Hexo = require('hexo');
+
+      // 创建 Hexo 实例
+      this.hexoInstance = new Hexo(this.projectPath, {
+        debug: false,
+        safe: false,
+        silent: false,
+        config: path.join(this.projectPath, '_config.yml')
+      });
+
+      console.log('[Hexo Server]: Hexo 实例创建完成');
+
+      // 初始化 Hexo
+      console.log('[Hexo Server]: 开始初始化 Hexo...');
+      await this.hexoInstance.init();
+      console.log('[Hexo Server]: Hexo 初始化完成');
+
+      // 加载插件和主题 - 现在应该能正确加载用户项目的插件
+      console.log('[Hexo Server]: 开始加载插件和主题...');
+      await this.hexoInstance.load();
+      console.log('[Hexo Server]: 插件和主题加载完成');
+
+      // 输出已加载的插件信息，用于调试
+      console.log('[Hexo Server]: =======插件加载状态报告=======');
+      
+      // 检查渲染器
+      try {
+        if (this.hexoInstance.extend && this.hexoInstance.extend.renderer) {
+          const renderers = this.hexoInstance.extend.renderer.list();
+          console.log('[Hexo Server]: 已加载的渲染器:', Object.keys(renderers));
+          
+          // 检查markdown相关的渲染器
+          const markdownRenderers = Object.keys(renderers).filter(name => 
+            name.includes('md') || name.includes('markdown')
+          );
+          if (markdownRenderers.length > 0) {
+            console.log('[Hexo Server]: Markdown渲染器:', markdownRenderers);
+          }
+        }
+      } catch (error) {
+        console.log('[Hexo Server]: 无法获取渲染器信息:', error.message);
+      }
+      
+      // 检查过滤器
+      try {
+        if (this.hexoInstance.extend && this.hexoInstance.extend.filter) {
+          const filters = this.hexoInstance.extend.filter.list();
+          console.log('[Hexo Server]: 已加载的过滤器数量:', Object.keys(filters).length);
+          
+          // 检查与渲染相关的过滤器
+          const renderFilters = Object.keys(filters).filter(name => 
+            name.includes('render') || name.includes('before_post_render') || name.includes('after_post_render')
+          );
+          if (renderFilters.length > 0) {
+            console.log('[Hexo Server]: 渲染相关过滤器:', renderFilters);
+          }
+        }
+      } catch (error) {
+        console.log('[Hexo Server]: 无法获取过滤器信息:', error.message);
+      }
+      
+      // 检查标签和助手函数
+      try {
+        if (this.hexoInstance.extend && this.hexoInstance.extend.tag) {
+          // 检查是否有list方法
+          if (typeof this.hexoInstance.extend.tag.list === 'function') {
+            const tags = this.hexoInstance.extend.tag.list();
+            console.log('[Hexo Server]: 已加载的标签数量:', Object.keys(tags).length);
+          } else {
+            // 尝试其他方法获取标签信息
+            const tagStore = this.hexoInstance.extend.tag;
+            if (tagStore && tagStore.store) {
+              console.log('[Hexo Server]: 已加载的标签数量:', Object.keys(tagStore.store).length);
+            } else {
+              console.log('[Hexo Server]: 标签扩展存在，但无法获取详细信息');
+            }
+          }
+        }
+      } catch (error) {
+        console.log('[Hexo Server]: 无法获取标签信息:', error.message);
+      }
+      
+      try {
+        if (this.hexoInstance.extend && this.hexoInstance.extend.helper) {
+          // 检查是否有list方法
+          if (typeof this.hexoInstance.extend.helper.list === 'function') {
+            const helpers = this.hexoInstance.extend.helper.list();
+            console.log('[Hexo Server]: 已加载的助手函数数量:', Object.keys(helpers).length);
+          } else {
+            // 尝试其他方法获取助手函数信息
+            const helperStore = this.hexoInstance.extend.helper;
+            if (helperStore && helperStore.store) {
+              console.log('[Hexo Server]: 已加载的助手函数数量:', Object.keys(helperStore.store).length);
+            } else {
+              console.log('[Hexo Server]: 助手函数扩展存在，但无法获取详细信息');
+            }
+          }
+        }
+      } catch (error) {
+        console.log('[Hexo Server]: 无法获取助手函数信息:', error.message);
+      }
+
+      // 检查已加载的npm包插件
+      try {
+        const packageJsonPath = path.join(this.projectPath, 'package.json');
+        if (fs.existsSync(packageJsonPath)) {
+          const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+          const dependencies = { ...packageJson.dependencies, ...packageJson.devDependencies };
+          
+          const hexoPlugins = Object.keys(dependencies).filter(dep => 
+            dep.startsWith('hexo-') && dep !== 'hexo' && dep !== 'hexo-cli'
+          );
+          
+          console.log('[Hexo Server]: package.json中的Hexo插件:', hexoPlugins);
+          
+          // 检查这些插件是否真的被加载了
+          hexoPlugins.forEach(plugin => {
+            try {
+              const pluginPath = path.join(this.projectPath, 'node_modules', plugin);
+              if (fs.existsSync(pluginPath)) {
+                console.log(`[Hexo Server]: ✓ 插件 ${plugin} 在node_modules中存在`);
+              } else {
+                console.log(`[Hexo Server]: ✗ 插件 ${plugin} 在node_modules中不存在`);
+              }
+            } catch (error) {
+              console.log(`[Hexo Server]: ? 无法检查插件 ${plugin}:`, error.message);
+            }
+          });
+        }
+      } catch (error) {
+        console.error('[Hexo Server]: 检查package.json插件时出错:', error);
+      }
+      
+      console.log('[Hexo Server]: =======插件加载状态报告结束=======');
+
+      // 将 hexo 实例设为全局变量，供插件使用
+      global.hexo = this.hexoInstance;
+
+      // 立即初始化数据库管理器
+      console.log('[Hexo Server]: 预初始化数据库管理器...');
+      try {
+        await databaseManager.initialize(this.hexoInstance);
+        console.log('[Hexo Server]: 数据库管理器预初始化完成');
+      } catch (error) {
+        console.error('[Hexo Server]: 数据库管理器预初始化失败:', error);
+        throw error;
+      }
+
+      // 构建索引文件（用于全局搜索）
+      try {
+        const hexoProCore = require('./hexo-pro-core/index');
+        if (hexoProCore && hexoProCore.buildIndex) {
+          console.log('[Hexo Server]: 构建搜索索引...');
+          // 临时设置全局hexo变量供buildIndex使用
+          const originalHexo = global.hexo;
+          global.hexo = this.hexoInstance;
+          hexoProCore.buildIndex();
+          global.hexo = originalHexo;
+          console.log('[Hexo Server]: 搜索索引构建完成');
+        }
+      } catch (error) {
+        console.error('[Hexo Server]: 构建搜索索引失败:', error);
+        // 如果构建索引失败，创建一个空的索引文件以避免读取错误
+        const fs = require('fs');
+        const indexPath = path.join(this.projectPath, 'blogInfoList.json');
+        if (!fs.existsSync(indexPath)) {
+          fs.writeFileSync(indexPath, JSON.stringify([]));
+          console.log('[Hexo Server]: 创建了空的搜索索引文件');
+        }
+      }
+
+      // 启动文件监听
+      await this.startWatching();
+      
+      console.log('[Hexo Server]: Hexo 实例初始化完全完成');
+      
     } catch (error) {
-      console.error('[Hexo Server]: 数据库管理器预初始化失败:', error);
+      console.error('[Hexo Server]: 初始化 Hexo 实例失败:', error);
       throw error;
+    } finally {
+      // 恢复原始工作目录（可选，根据需要决定）
+      // process.chdir(originalCwd);
+      // console.log('[Hexo Server]: 已恢复原始工作目录:', process.cwd());
     }
-
-    // 构建索引文件（用于全局搜索）
-    try {
-      const hexoProCore = require('./hexo-pro-core/index');
-      if (hexoProCore && hexoProCore.buildIndex) {
-        console.log('[Hexo Server]: 构建搜索索引...');
-        // 临时设置全局hexo变量供buildIndex使用
-        const originalHexo = global.hexo;
-        global.hexo = this.hexoInstance;
-        hexoProCore.buildIndex();
-        global.hexo = originalHexo;
-        console.log('[Hexo Server]: 搜索索引构建完成');
-      }
-    } catch (error) {
-      console.error('[Hexo Server]: 构建搜索索引失败:', error);
-      // 如果构建索引失败，创建一个空的索引文件以避免读取错误
-      const fs = require('fs');
-      const indexPath = path.join(this.projectPath, 'blogInfoList.json');
-      if (!fs.existsSync(indexPath)) {
-        fs.writeFileSync(indexPath, JSON.stringify([]));
-        console.log('[Hexo Server]: 创建了空的搜索索引文件');
-      }
-    }
-
-    // 启动文件监听
-    await this.startWatching();
   }
 
   async startWatching() {
@@ -679,6 +853,16 @@ class HexoProServer {
       }
     }
 
+    // 清理项目相关的模块路径
+    if (this.projectPath) {
+      const projectNodeModules = path.join(this.projectPath, 'node_modules');
+      const modulePathIndex = module.paths.indexOf(projectNodeModules);
+      if (modulePathIndex !== -1) {
+        module.paths.splice(modulePathIndex, 1);
+        console.log('[Hexo Server]: 已从模块解析路径中移除项目node_modules');
+      }
+    }
+
     // 清理全局状态
     if (global.hexo) {
       delete global.hexo;
@@ -702,6 +886,12 @@ class HexoProServer {
     // 重置端口为默认值
     this.hexoPort = 4000;
 
+    // 恢复原始NODE_PATH
+    if (this.originalNodePath) {
+      process.env.NODE_PATH = this.originalNodePath;
+      console.log('[Hexo Server]: 已恢复原始NODE_PATH:', process.env.NODE_PATH);
+    }
+
     console.log('Hexo Pro Server stopped');
   }
 
@@ -723,6 +913,16 @@ class HexoProServer {
         console.error('[Hexo Server]: 强制停止 Hexo 内置服务器时出错:', error);
       }
       this.hexoServer = null;
+    }
+
+    // 清理项目相关的模块路径
+    if (this.projectPath) {
+      const projectNodeModules = path.join(this.projectPath, 'node_modules');
+      const modulePathIndex = module.paths.indexOf(projectNodeModules);
+      if (modulePathIndex !== -1) {
+        module.paths.splice(modulePathIndex, 1);
+        console.log('[Hexo Server]: 已从模块解析路径中移除项目node_modules');
+      }
     }
 
     // 清理所有状态
@@ -751,6 +951,12 @@ class HexoProServer {
 
     // 重置端口
     this.hexoPort = 4000;
+
+    // 恢复原始NODE_PATH
+    if (this.originalNodePath) {
+      process.env.NODE_PATH = this.originalNodePath;
+      console.log('[Hexo Server]: 已恢复原始NODE_PATH:', process.env.NODE_PATH);
+    }
 
     console.log('服务器已强制停止');
   }

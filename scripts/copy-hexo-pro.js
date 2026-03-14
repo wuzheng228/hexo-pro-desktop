@@ -61,6 +61,8 @@ async function copyHexoProCore() {
       'settings_api.js',
       'auth_api.js',
       'ai_api.js',
+      'theme_api.js',
+      'schema_generator.js',
       'db.js',
       'utils.js',
       'debug.js',

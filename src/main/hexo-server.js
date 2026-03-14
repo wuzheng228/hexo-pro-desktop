@@ -73,37 +73,9 @@ class HexoProServer {
       // 先注册Hexo插件（在服务器启动前）
       await this.registerHexoPlugin();
 
-      // 改进的端口选择逻辑，包含错误处理
-      let availablePort;
-      let attempts = 0;
-      const maxAttempts = 3;
-
-      while (attempts < maxAttempts) {
-        try {
-          console.log(`[Hexo Server]: 第 ${attempts + 1} 次尝试寻找可用端口...`);
-          availablePort = await this.findAvailablePort(4000);
-          break;
-        } catch (error) {
-          attempts++;
-          console.error(`[Hexo Server]: 端口选择失败 (尝试 ${attempts}/${maxAttempts}):`, error.message);
-
-          if (attempts >= maxAttempts) {
-            // 最后一次尝试：使用完全动态的端口
-            console.log('[Hexo Server]: 所有预定义端口都失败，尝试完全动态端口分配');
-            try {
-              availablePort = await this.findDynamicPort();
-              break;
-            } catch (dynamicError) {
-              throw new Error(`端口分配完全失败: ${error.message} | 动态端口错误: ${dynamicError.message}`);
-            }
-          } else {
-            // 等待一段时间后重试
-            await new Promise(resolve => setTimeout(resolve, 1000));
-          }
-        }
-      }
-
-      this.hexoPort = availablePort;
+      // 使用动态端口，避免端口冲突
+      console.log('[Hexo Server]: 使用系统动态分配端口...');
+      this.hexoPort = await this.findDynamicPort();
       console.log(`[Hexo Server]: 最终使用端口 ${this.hexoPort}`);
 
       // 启动 Hexo 内置服务器
@@ -524,6 +496,34 @@ class HexoProServer {
       res.end(JSON.stringify({
         isWatching: this.isWatching
       }));
+    });
+
+    // 重启服务器（主题切换等场景使用）
+    app.use('/hexopro/api/desktop/restart', async (req, res) => {
+      if (req.method !== 'POST') {
+        res.statusCode = 405;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ success: false, message: '仅支持 POST 方法' }));
+        return;
+      }
+
+      try {
+        console.log('[Desktop Server]: 收到重启服务器请求');
+        await this.restart();
+        console.log('[Desktop Server]: 服务器重启成功');
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({
+          success: true,
+          message: '服务器重启成功',
+          url: this.getUrl(),
+          port: this.getPort()
+        }));
+      } catch (error) {
+        console.error('[Desktop Server]: 服务器重启失败:', error);
+        res.statusCode = 500;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ success: false, message: error.message || '重启失败' }));
+      }
     });
   }
 

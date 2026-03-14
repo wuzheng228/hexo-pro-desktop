@@ -9,6 +9,7 @@ const settings_api = require('./settings_api'); // 添加设置API
 const auth_api = require('./auth_api'); // 添加认证API
 const recycle_api = require('./recycle_api'); // 回收站API
 const ai_api = require('./ai_api'); // AI 代理API
+const theme_api = require('./theme_api'); // 主题市场API
 const CircularJSON = require('circular-json');
 const crypto = require('crypto');
 const { expressjwt: jwt } = require('express-jwt'); // 确保引入 express-jwt
@@ -207,6 +208,8 @@ module.exports = async function (app, hexo) { // 将导出函数改为 async
         const apiBasePath = `${rootPrefix}hexopro/api`.replace('//', '/'); // API基础路径
         const unlessPaths = [
             `${apiBasePath}/login`,
+            `${apiBasePath}/auth/security-question`, // 获取安全问题，无需token
+            `${apiBasePath}/auth/reset-password`, // 忘记密码重置接口，无需token
             `${apiBasePath}/settings/check-first-use`,
             `${apiBasePath}/settings/register`,
             `${apiBasePath}/settings/skip-setup`, // 添加跳过设置API到排除列表
@@ -216,7 +219,8 @@ module.exports = async function (app, hexo) { // 将导出函数改为 async
             `${apiBasePath}/desktop/save-token`, // 添加桌面端保存token API到排除列表
             `${apiBasePath}/ai/chat`, // AI 聊天代理接口（解决 CORS 问题）
             `${apiBasePath}/ai/settings`, // AI 设置接口
-            `${apiBasePath}/ai/settings/save` // AI 设置保存接口
+            `${apiBasePath}/ai/settings/save`, // AI 设置保存接口
+            `${apiBasePath}/theme/schema/generate`, // 主题 Schema 生成接口
         ];
 
 
@@ -252,6 +256,7 @@ module.exports = async function (app, hexo) { // 将导出函数改为 async
         recycle_api(app, hexo, use, db); // 注册回收站API
         auth_api(app, hexo, use); // 注册认证API
         ai_api(app, hexo, use, db); // 注册 AI 代理API
+        theme_api(app, hexo, use, db); // 注册主题市场API
 
 
         app.use((err, req, res, next) => {

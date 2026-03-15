@@ -5,6 +5,13 @@ const { exec, spawn } = require('child_process');
 const { promisify } = require('util');
 const HexoProServer = require('./hexo-server');
 const AuthManager = require('./auth-manager');
+let autoUpdater = null;
+
+try {
+  ({ autoUpdater } = require('electron-updater'));
+} catch (error) {
+  console.warn('[Updater]: electron-updater 未安装，自动更新功能不可用:', error.message);
+}
 
 const execAsync = promisify(exec);
 
@@ -60,6 +67,20 @@ class HexoProDesktop {
 
     // 添加项目加载状态管理
     this.isProjectLoading = false;
+
+    // 自动更新状态
+    this.autoUpdaterSupported = Boolean(autoUpdater);
+    this.autoUpdaterInitialized = false;
+    this.userInitiatedUpdateCheck = false;
+    this.updateDialogVisible = false;
+    this.updaterState = {
+      status: 'idle',
+      currentVersion: app.getVersion(),
+      availableVersion: null,
+      progress: 0,
+      error: null,
+      lastCheckedAt: null
+    };
 
     // 设置全局变量，供HexoProServer访问
     global.desktopAuthManager = this.authManager;
@@ -168,6 +189,218 @@ class HexoProDesktop {
     if (store) {
       store.delete(key);
     }
+  }
+
+  isAutoUpdateAvailable() {
+    return this.autoUpdaterSupported && app.isPackaged;
+  }
+
+  setUpdaterState(partialState = {}) {
+    this.updaterState = {
+      ...this.updaterState,
+      ...partialState
+    };
+
+    if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+      this.mainWindow.webContents.send('updater-status', this.updaterState);
+    }
+  }
+
+  setupAutoUpdater() {
+    if (!this.isAutoUpdateAvailable() || this.autoUpdaterInitialized) {
+      return;
+    }
+
+    this.autoUpdaterInitialized = true;
+    autoUpdater.autoDownload = false;
+    autoUpdater.autoInstallOnAppQuit = true;
+
+    autoUpdater.on('checking-for-update', () => {
+      this.setUpdaterState({
+        status: 'checking',
+        error: null,
+        progress: 0,
+        lastCheckedAt: new Date().toISOString()
+      });
+    });
+
+    autoUpdater.on('update-available', async (info) => {
+      this.userInitiatedUpdateCheck = false;
+      this.setUpdaterState({
+        status: 'update-available',
+        availableVersion: info?.version || null,
+        error: null,
+        progress: 0
+      });
+
+      if (this.updateDialogVisible || !this.mainWindow || this.mainWindow.isDestroyed()) {
+        return;
+      }
+
+      this.updateDialogVisible = true;
+      try {
+        const result = await dialog.showMessageBox(this.mainWindow, {
+          type: 'info',
+          title: '发现新版本',
+          message: `检测到新版本 ${info?.version || ''}`,
+          detail: '是否立即下载更新？下载完成后可一键重启安装。',
+          buttons: ['立即下载', '稍后'],
+          defaultId: 0,
+          cancelId: 1
+        });
+
+        if (result.response === 0) {
+          await this.downloadUpdate();
+        }
+      } catch (error) {
+        console.error('[Updater]: 显示更新提示失败:', error);
+      } finally {
+        this.updateDialogVisible = false;
+      }
+    });
+
+    autoUpdater.on('update-not-available', () => {
+      this.setUpdaterState({
+        status: 'up-to-date',
+        availableVersion: null,
+        progress: 0,
+        error: null
+      });
+
+      if (this.userInitiatedUpdateCheck && this.mainWindow && !this.mainWindow.isDestroyed()) {
+        dialog.showMessageBox(this.mainWindow, {
+          type: 'info',
+          title: '检查更新',
+          message: '当前已是最新版本',
+          detail: `当前版本：${app.getVersion()}`,
+          buttons: ['确定']
+        }).catch((error) => {
+          console.error('[Updater]: 显示最新版本提示失败:', error);
+        });
+      }
+
+      this.userInitiatedUpdateCheck = false;
+    });
+
+    autoUpdater.on('download-progress', (progressObj) => {
+      const percent = Number((progressObj?.percent || 0).toFixed(1));
+      this.setUpdaterState({
+        status: 'downloading',
+        progress: percent,
+        error: null
+      });
+    });
+
+    autoUpdater.on('update-downloaded', async (info) => {
+      this.setUpdaterState({
+        status: 'downloaded',
+        availableVersion: info?.version || this.updaterState.availableVersion,
+        progress: 100,
+        error: null
+      });
+
+      if (!this.mainWindow || this.mainWindow.isDestroyed()) {
+        return;
+      }
+
+      try {
+        const result = await dialog.showMessageBox(this.mainWindow, {
+          type: 'info',
+          title: '更新已下载',
+          message: `新版本 ${info?.version || this.updaterState.availableVersion || ''} 已下载完成`,
+          detail: '是否立即重启并安装更新？',
+          buttons: ['重启安装', '稍后'],
+          defaultId: 0,
+          cancelId: 1
+        });
+
+        if (result.response === 0) {
+          this.installUpdate();
+        }
+      } catch (error) {
+        console.error('[Updater]: 显示安装提示失败:', error);
+      }
+    });
+
+    autoUpdater.on('error', (error) => {
+      const msg = error?.message || String(error);
+      this.setUpdaterState({
+        status: 'error',
+        error: msg
+      });
+
+      if (this.userInitiatedUpdateCheck && this.mainWindow && !this.mainWindow.isDestroyed()) {
+        dialog.showMessageBox(this.mainWindow, {
+          type: 'error',
+          title: '更新失败',
+          message: '检查更新失败',
+          detail: msg,
+          buttons: ['确定']
+        }).catch((dialogError) => {
+          console.error('[Updater]: 显示更新错误弹窗失败:', dialogError);
+        });
+      }
+
+      this.userInitiatedUpdateCheck = false;
+    });
+  }
+
+  async checkForUpdates(userInitiated = false) {
+    if (userInitiated) {
+      this.userInitiatedUpdateCheck = true;
+    }
+
+    if (!this.autoUpdaterSupported) {
+      const message = '未安装 electron-updater，自动更新不可用';
+      this.setUpdaterState({ status: 'disabled', error: message });
+      return { supported: false, message };
+    }
+
+    if (!app.isPackaged) {
+      const message = '开发模式下不支持自动更新检查';
+      this.setUpdaterState({ status: 'disabled', error: message });
+      if (userInitiated && this.mainWindow && !this.mainWindow.isDestroyed()) {
+        await dialog.showMessageBox(this.mainWindow, {
+          type: 'info',
+          title: '检查更新',
+          message,
+          buttons: ['确定']
+        });
+      }
+      this.userInitiatedUpdateCheck = false;
+      return { supported: false, message };
+    }
+
+    this.setupAutoUpdater();
+    try {
+      await autoUpdater.checkForUpdates();
+    } catch (error) {
+      this.userInitiatedUpdateCheck = false;
+      throw error;
+    }
+    return { supported: true };
+  }
+
+  async downloadUpdate() {
+    if (!this.isAutoUpdateAvailable()) {
+      return { supported: false };
+    }
+
+    this.setupAutoUpdater();
+    await autoUpdater.downloadUpdate();
+    return { supported: true };
+  }
+
+  installUpdate() {
+    if (!this.isAutoUpdateAvailable()) {
+      return { supported: false };
+    }
+
+    this.setUpdaterState({ status: 'installing' });
+    setImmediate(() => {
+      autoUpdater.quitAndInstall(false, true);
+    });
+    return { supported: true };
   }
 
   async createWindow() {
@@ -609,6 +842,16 @@ class HexoProDesktop {
       {
         label: '帮助',
         submenu: [
+          {
+            label: '检查更新',
+            enabled: this.autoUpdaterSupported,
+            click: () => {
+              this.checkForUpdates(true).catch((error) => {
+                console.error('[Updater]: 手动检查更新失败:', error);
+              });
+            }
+          },
+          { type: 'separator' },
           {
             label: '关于 Hexo Pro Desktop',
             click: () => {
@@ -1648,6 +1891,16 @@ class HexoProDesktop {
     app.whenReady().then(async () => {
       await this.createWindow();
       this.createMenu();
+      this.setupAutoUpdater();
+
+      // 启动后延迟检查更新，避免影响冷启动体验
+      if (this.isAutoUpdateAvailable()) {
+        setTimeout(() => {
+          this.checkForUpdates(false).catch((error) => {
+            console.error('[Updater]: 启动后自动检查更新失败:', error);
+          });
+        }, 15000);
+      }
 
       // 在macOS上，如果是从隐藏状态恢复，尝试恢复之前的状态
       if (process.platform === 'darwin' && this.windowHidden) {
@@ -1857,6 +2110,23 @@ class HexoProDesktop {
     ipcMain.handle('show-message', async (event, options) => {
       const result = await dialog.showMessageBox(this.mainWindow, options);
       return result;
+    });
+
+    // 更新检查
+    ipcMain.handle('updater-check', async () => {
+      return this.checkForUpdates(true);
+    });
+
+    ipcMain.handle('updater-download', async () => {
+      return this.downloadUpdate();
+    });
+
+    ipcMain.handle('updater-install', async () => {
+      return this.installUpdate();
+    });
+
+    ipcMain.handle('updater-get-state', () => {
+      return this.updaterState;
     });
 
     // 打开外部链接

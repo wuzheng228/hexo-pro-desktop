@@ -24,6 +24,7 @@
     "dist:mac": "yarn build && electron-builder --mac --publish=never",
     "dist:win": "yarn build && electron-builder --win --publish=never",
     "dist:linux": "yarn build && electron-builder --linux --publish=never",
+    "dist:publish": "yarn build && electron-builder --publish always",
     "pack": "electron-builder --dir",
     "copy-core": "node scripts/copy-hexo-pro.js",
     "postinstall": "electron-builder install-app-deps",
@@ -60,6 +61,7 @@
     "connect-history-api-fallback": "^2.0.0",
     "cos-nodejs-sdk-v5": "^2.15.4",
     "electron-store": "^10.0.0",
+    "electron-updater": "^6.3.9",
     "express": "^4.18.2",
     "express-jwt": "^8.4.1",
     "extend": "^3.0.2",
@@ -87,6 +89,14 @@
     "directories": {
       "output": "dist"
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "wuzheng228",
+        "repo": "hexo-pro-desktop",
+        "releaseType": "release"
+      }
+    ],
     "files": [
       "src/**/*",
       "assets/**/*",
@@ -121,6 +131,14 @@
         {
           "target": "dmg",
           "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "universal",
+            "arm64",
             "x64"
           ]
         }

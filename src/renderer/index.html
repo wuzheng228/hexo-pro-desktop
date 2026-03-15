@@ -131,6 +131,12 @@
             constructor() {
                 this.apiBaseUrl = 'http://localhost:4000/hexopro/api';
                 this.webUrl = 'http://localhost:4000/pro';
+                this.startTime = Date.now();
+                this.connectionFailureCount = 0;
+                // 冷启动阶段服务可能尚未监听端口，避免短暂闪现错误提示
+                this.initialErrorGraceMs = 10000;
+                this.pollingDelayMs = 1000;
+                this.errorRetryDelayMs = 3000;
                 this.init();
             }
 
@@ -142,10 +148,12 @@
 
             async checkServerStatus() {
                 const statusEl = document.getElementById('status');
+                const elapsedMs = Date.now() - this.startTime;
                 
                 try {
-                    const response = await fetch(`${this.apiBaseUrl}/desktop/status`);
+                    const response = await fetch(`${this.apiBaseUrl}/desktop/status`, { cache: 'no-store' });
                     const data = await response.json();
+                    this.connectionFailureCount = 0;
                     
                     console.log('服务器状态:', data);
                     
@@ -169,17 +177,27 @@
                         // 服务器还在启动中，1秒后重试
                         setTimeout(() => {
                             this.checkServerStatus();
-                        }, 1000);
+                        }, this.pollingDelayMs);
                     }
                 } catch (error) {
                     console.error('检查服务器状态失败:', error);
-                    statusEl.className = 'status error';
-                    statusEl.innerHTML = '<p>❌ 无法连接到服务器</p>';
+                    this.connectionFailureCount += 1;
+                    const inGracePeriod = elapsedMs < this.initialErrorGraceMs;
+
+                    const shouldShowError = !inGracePeriod && this.connectionFailureCount >= 2;
+
+                    if (!shouldShowError) {
+                        statusEl.className = 'status loading';
+                        statusEl.innerHTML = '<p>🔄 正在连接服务器...</p>';
+                    } else {
+                        statusEl.className = 'status error';
+                        statusEl.innerHTML = '<p>❌ 无法连接到服务器</p>';
+                    }
                     
-                    // 连接失败，3秒后重试
+                    // 连接失败后持续重试，避免要求用户手动刷新
                     setTimeout(() => {
                         this.checkServerStatus();
-                    }, 3000);
+                    }, this.errorRetryDelayMs);
                 }
             }
 

@@ -85,6 +85,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
       return '1.0.0';
     }
   },
+
+  // 自动更新
+  updater: {
+    checkForUpdates: () => ipcRenderer.invoke('updater-check'),
+    downloadUpdate: () => ipcRenderer.invoke('updater-download'),
+    installUpdate: () => ipcRenderer.invoke('updater-install'),
+    getState: () => ipcRenderer.invoke('updater-get-state'),
+    onStatusChange: (callback) => {
+      const listener = (event, state) => callback(state);
+      ipcRenderer.on('updater-status', listener);
+      return () => ipcRenderer.removeListener('updater-status', listener);
+    }
+  },
   
   // 桌面端特有功能
   desktop: {

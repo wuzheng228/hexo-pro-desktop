@@ -328,8 +328,8 @@ class HexoProDesktop {
     console.log(path.join(__dirname, '../../assets/icon.png'))
     // 创建主窗口
     this.mainWindow = new BrowserWindow({
-      width: 1200,
-      height: 800,
+      width: 1500,
+      height: 950,
       minWidth: 1000,
       minHeight: 600,
       webPreferences: {

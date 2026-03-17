@@ -65,7 +65,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   
   onOpenSettings: (callback) => {
-    ipcRenderer.on('open-settings', () => callback());
+    const listener = (event, payload) => callback(payload);
+    ipcRenderer.on('open-settings', listener);
+    return () => ipcRenderer.removeListener('open-settings', listener);
   },
   
   // 移除事件监听器

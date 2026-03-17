@@ -72,7 +72,6 @@ class HexoProDesktop {
     this.autoUpdaterSupported = Boolean(autoUpdater);
     this.autoUpdaterInitialized = false;
     this.userInitiatedUpdateCheck = false;
-    this.updateDialogVisible = false;
     this.updaterState = {
       status: 'idle',
       currentVersion: app.getVersion(),
@@ -224,7 +223,7 @@ class HexoProDesktop {
       });
     });
 
-    autoUpdater.on('update-available', async (info) => {
+    autoUpdater.on('update-available', (info) => {
       this.userInitiatedUpdateCheck = false;
       this.setUpdaterState({
         status: 'update-available',
@@ -232,31 +231,6 @@ class HexoProDesktop {
         error: null,
         progress: 0
       });
-
-      if (this.updateDialogVisible || !this.mainWindow || this.mainWindow.isDestroyed()) {
-        return;
-      }
-
-      this.updateDialogVisible = true;
-      try {
-        const result = await dialog.showMessageBox(this.mainWindow, {
-          type: 'info',
-          title: '发现新版本',
-          message: `检测到新版本 ${info?.version || ''}`,
-          detail: '是否立即下载更新？下载完成后可一键重启安装。',
-          buttons: ['立即下载', '稍后'],
-          defaultId: 0,
-          cancelId: 1
-        });
-
-        if (result.response === 0) {
-          await this.downloadUpdate();
-        }
-      } catch (error) {
-        console.error('[Updater]: 显示更新提示失败:', error);
-      } finally {
-        this.updateDialogVisible = false;
-      }
     });
 
     autoUpdater.on('update-not-available', () => {
@@ -266,18 +240,6 @@ class HexoProDesktop {
         progress: 0,
         error: null
       });
-
-      if (this.userInitiatedUpdateCheck && this.mainWindow && !this.mainWindow.isDestroyed()) {
-        dialog.showMessageBox(this.mainWindow, {
-          type: 'info',
-          title: '检查更新',
-          message: '当前已是最新版本',
-          detail: `当前版本：${app.getVersion()}`,
-          buttons: ['确定']
-        }).catch((error) => {
-          console.error('[Updater]: 显示最新版本提示失败:', error);
-        });
-      }
 
       this.userInitiatedUpdateCheck = false;
     });
@@ -291,35 +253,13 @@ class HexoProDesktop {
       });
     });
 
-    autoUpdater.on('update-downloaded', async (info) => {
+    autoUpdater.on('update-downloaded', (info) => {
       this.setUpdaterState({
         status: 'downloaded',
         availableVersion: info?.version || this.updaterState.availableVersion,
         progress: 100,
         error: null
       });
-
-      if (!this.mainWindow || this.mainWindow.isDestroyed()) {
-        return;
-      }
-
-      try {
-        const result = await dialog.showMessageBox(this.mainWindow, {
-          type: 'info',
-          title: '更新已下载',
-          message: `新版本 ${info?.version || this.updaterState.availableVersion || ''} 已下载完成`,
-          detail: '是否立即重启并安装更新？',
-          buttons: ['重启安装', '稍后'],
-          defaultId: 0,
-          cancelId: 1
-        });
-
-        if (result.response === 0) {
-          this.installUpdate();
-        }
-      } catch (error) {
-        console.error('[Updater]: 显示安装提示失败:', error);
-      }
     });
 
     autoUpdater.on('error', (error) => {
@@ -328,18 +268,6 @@ class HexoProDesktop {
         status: 'error',
         error: msg
       });
-
-      if (this.userInitiatedUpdateCheck && this.mainWindow && !this.mainWindow.isDestroyed()) {
-        dialog.showMessageBox(this.mainWindow, {
-          type: 'error',
-          title: '更新失败',
-          message: '检查更新失败',
-          detail: msg,
-          buttons: ['确定']
-        }).catch((dialogError) => {
-          console.error('[Updater]: 显示更新错误弹窗失败:', dialogError);
-        });
-      }
 
       this.userInitiatedUpdateCheck = false;
     });
@@ -353,20 +281,13 @@ class HexoProDesktop {
     if (!this.autoUpdaterSupported) {
       const message = '未安装 electron-updater，自动更新不可用';
       this.setUpdaterState({ status: 'disabled', error: message });
+      this.userInitiatedUpdateCheck = false;
       return { supported: false, message };
     }
 
     if (!app.isPackaged) {
       const message = '开发模式下不支持自动更新检查';
       this.setUpdaterState({ status: 'disabled', error: message });
-      if (userInitiated && this.mainWindow && !this.mainWindow.isDestroyed()) {
-        await dialog.showMessageBox(this.mainWindow, {
-          type: 'info',
-          title: '检查更新',
-          message,
-          buttons: ['确定']
-        });
-      }
       this.userInitiatedUpdateCheck = false;
       return { supported: false, message };
     }
@@ -846,9 +767,7 @@ class HexoProDesktop {
             label: '检查更新',
             enabled: this.autoUpdaterSupported,
             click: () => {
-              this.checkForUpdates(true).catch((error) => {
-                console.error('[Updater]: 手动检查更新失败:', error);
-              });
+              this.openSettingsWithOptions({ tab: 'help', action: 'check-update' });
             }
           },
           { type: 'separator' },
@@ -1869,8 +1788,16 @@ class HexoProDesktop {
   }
 
   openSettings() {
+    this.openSettingsWithOptions();
+  }
+
+  openSettingsWithOptions(options = {}) {
+    if (!this.mainWindow || this.mainWindow.isDestroyed()) {
+      return;
+    }
+
     // 通知渲染进程打开设置页面
-    this.mainWindow.webContents.send('open-settings');
+    this.mainWindow.webContents.send('open-settings', options);
   }
 
   showAbout() {

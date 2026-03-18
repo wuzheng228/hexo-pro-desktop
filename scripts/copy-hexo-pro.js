@@ -9,7 +9,7 @@ function findHexoProDirectory() {
     // 独立项目时的路径
     path.join(__dirname, '../../hexo-pro-client/hexo-pro'),
     // 检查是否在同级目录
-    path.join(__dirname, '../../../../hexo-pro'),
+    path.join(__dirname, '../../hexo-pro'),
     // 直接检查已知的正确路径
     '/Users/warms/Workspace/code/node_project/hexo-pro-client/hexo-pro',
   ];

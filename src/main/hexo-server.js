@@ -598,8 +598,9 @@ class HexoProServer {
         });
       }
 
-      // 动态引入 Hexo
-      const Hexo = require('hexo');
+      // 动态引入 Hexo - 使用import()处理ES Module依赖
+      const HexoModule = await import('hexo');
+      const Hexo = HexoModule.default || HexoModule;
 
       // 创建 Hexo 实例
       this.hexoInstance = new Hexo(this.projectPath, {

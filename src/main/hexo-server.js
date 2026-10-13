@@ -5,6 +5,7 @@ const bodyParser = require('body-parser');
 const serveStatic = require('serve-static');
 const net = require('net');
 const mime = require('mime');
+const { assertSupportedNodeRuntime } = require('./runtime-compatibility');
 
 // 添加fetch支持（对于Node.js < 18版本）
 const fetch = (() => {
@@ -198,7 +199,6 @@ class HexoProServer {
         app.use('/pro', (req, res, next) => {
           console.log('[Hexo Server]: 收到前端路由请求:', req.originalUrl);
           console.log('[Hexo Server]: 请求方法:', req.method);
-          console.log('[Hexo Server]: 请求头:', req.headers);
 
           const isStaticFile = ['.html', '.css', '.js', '.jpg', '.png', '.gif', '.svg', '.ico'].some(
             extension => req.originalUrl.endsWith(extension)
@@ -407,95 +407,12 @@ class HexoProServer {
       }));
     });
 
-    // 桌面端保存token（处理前端登录成功）
-    app.use('/hexopro/api/desktop/save-token', (req, res) => {
-      console.log('[Desktop Server]: /hexopro/api/desktop/save-token 被调用');
-      console.log('[Desktop Server]: 请求方法:', req.method);
-      console.log('[Desktop Server]: 请求头:', req.headers);
-      console.log('[Desktop Server]: 请求体:', req.body);
-
-      if (req.method === 'POST') {
-        try {
-          const { token } = req.body;
-          console.log('[Desktop Server]: 接收到保存token请求');
-          console.log('[Desktop Server]: Token长度:', token ? token.length : '无token');
-          console.log('[Desktop Server]: Token内容预览:', token ? token.substring(0, 20) + '...' : '无token');
-          console.log('[Desktop Server]: 项目路径:', this.projectPath);
-          console.log('[Desktop Server]: global.desktopAuthManager存在:', !!global.desktopAuthManager);
-
-          if (!token) {
-            console.error('[Desktop Server]: 请求中缺少token');
-            res.statusCode = 400;
-            res.setHeader('Content-Type', 'application/json');
-            res.end(JSON.stringify({ success: false, message: '缺少token' }));
-            return;
-          }
-
-          // 验证token格式 - JWT应该是3个用.分隔的base64字符串
-          const jwtPattern = /^[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]*$/;
-          if (!jwtPattern.test(token)) {
-            console.error('[Desktop Server]: Token格式无效，拒绝保存:', token.substring(0, 50) + '...');
-            res.statusCode = 400;
-            res.setHeader('Content-Type', 'application/json');
-            res.end(JSON.stringify({ success: false, message: 'Token格式无效，必须是标准JWT格式' }));
-            return;
-          }
-
-          console.log('[Desktop Server]: Token格式验证通过');
-
-          if (!this.projectPath) {
-            console.error('[Desktop Server]: 当前项目路径未设置');
-            res.statusCode = 400;
-            res.setHeader('Content-Type', 'application/json');
-            res.end(JSON.stringify({ success: false, message: '当前项目路径未设置' }));
-            return;
-          }
-
-          if (!global.desktopAuthManager) {
-            console.error('[Desktop Server]: AuthManager实例不可用');
-            res.statusCode = 500;
-            res.setHeader('Content-Type', 'application/json');
-            res.end(JSON.stringify({ success: false, message: 'AuthManager不可用' }));
-            return;
-          }
-
-          console.log('[Desktop Server]: 正在保存token到AuthManager...');
-
-          // 异步保存token，避免阻塞响应
-          global.desktopAuthManager.setToken(this.projectPath, token).then(() => {
-            console.log('[Desktop Server]: Token保存操作完成');
-
-            // 验证token是否真的被保存了
-            setTimeout(() => {
-              const savedToken = global.desktopAuthManager.getToken(this.projectPath);
-              if (savedToken === token) {
-                console.log('[Desktop Server]: Token验证成功，已正确保存到:', this.projectPath);
-              } else {
-                console.error('[Desktop Server]: Token验证失败，保存可能有问题');
-                console.log('[Desktop Server]: 预期token长度:', token.length);
-                console.log('[Desktop Server]: 实际token长度:', savedToken ? savedToken.length : '无token');
-              }
-            }, 100);
-          }).catch((error) => {
-            console.error('[Desktop Server]: 保存token时出错:', error);
-          });
-
-          console.log('[Desktop Server]: 立即响应成功（异步保存）');
-          res.setHeader('Content-Type', 'application/json');
-          res.end(JSON.stringify({ success: true, message: 'Token保存请求已接收' }));
-
-        } catch (error) {
-          console.error('[Desktop Server]: 保存token失败:', error);
-          res.statusCode = 500;
-          res.setHeader('Content-Type', 'application/json');
-          res.end(JSON.stringify({ success: false, message: '保存token失败: ' + error.message }));
-        }
-      } else {
-        console.log('[Desktop Server]: 不支持的请求方法:', req.method);
-        res.statusCode = 405;
-        res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ success: false, message: '方法不允许，仅支持POST' }));
-      }
+    // Credential writes are only available through the validated Electron IPC bridge.
+    // Keep an explicit response so an old renderer cannot silently use an insecure fallback.
+    app.use('/hexopro/api/desktop/save-token', (_req, res) => {
+      res.statusCode = 410;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ success: false, message: '请通过桌面安全接口保存登录信息' }));
     });
 
     // 获取项目信息
@@ -561,6 +478,7 @@ class HexoProServer {
     const originalCwd = process.cwd();
     
     try {
+      assertSupportedNodeRuntime(process.versions);
       console.log('[Hexo Server]: 开始初始化 Hexo 实例...');
       console.log('[Hexo Server]: 项目路径:', this.projectPath);
       console.log('[Hexo Server]: 当前工作目录:', originalCwd);

@@ -1,15 +1,15 @@
 {
   "name": "hexo-pro-desktop",
-  "version": "2.0.0",
+  "version": "2.1.0-beta.0",
   "description": "Hexo Pro 桌面客户端 - 一个基于 Electron 的 Hexo 博客管理工具",
-  "main": "src/main/main.js",
+  "main": "src/main/bootstrap.js",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "overrides": {
-    "strip-ansi": "6.0.1",
-    "undici": "5.28.4",
     "cheerio": "1.0.0-rc.12"
   },
   "resolutions": {
-    "undici": "5.28.4",
     "cheerio": "1.0.0-rc.12"
   },
   "scripts": {
@@ -18,7 +18,7 @@
     "dev:react": "echo '开发模式下直接使用已构建的前端资源'",
     "build": "yarn copy-core && yarn build:react && yarn build:electron",
     "build:react": "echo '前端资源由父项目构建，跳过此步骤'",
-    "build:electron": "electron-builder",
+    "build:electron": "electron-builder --publish never",
     "dist": "yarn build && electron-builder --publish=never",
     "dist:all": "yarn build && electron-builder --mac --win --linux --publish=never",
     "dist:mac": "yarn build && electron-builder --mac --publish=never",
@@ -49,8 +49,8 @@
   "author": "wuzheng",
   "license": "MIT",
   "devDependencies": {
-    "electron": "^28.0.0",
-    "electron-builder": "^24.9.1",
+    "electron": "^43.7.9",
+    "electron-builder": "^26.15.3",
     "rimraf": "^5.0.0"
   },
   "dependencies": {
@@ -61,6 +61,7 @@
     "body-parser": "^1.20.2",
     "browser-sync": "^3.0.4",
     "cheerio": "^1.0.0",
+    "chokidar": "^3.6.0",
     "circular-json": "^0.5.9",
     "connect-history-api-fallback": "^2.0.0",
     "cos-nodejs-sdk-v5": "^2.15.4",
@@ -82,6 +83,7 @@
     "jsonwebtoken": "^9.0.2",
     "lodash": "^4.17.21",
     "mime": "^3.0.0",
+    "moment": "^2.30.1",
     "multer": "^1.4.5-lts.2",
     "qiniu": "^7.14.0",
     "serve-static": "^1.15.0",
@@ -96,9 +98,9 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "wuzheng228",
+        "owner": "heywarms",
         "repo": "hexo-pro",
-        "releaseType": "release"
+        "releaseType": "prerelease"
       }
     ],
     "files": [

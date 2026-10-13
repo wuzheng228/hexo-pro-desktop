@@ -41,8 +41,9 @@ Hexo Pro Desktop 是 hexo-pro 插件的桌面版本，提供了一个独立的�
 
 ## 系统要求
 
-- **操作系统**: Windows 10+, macOS 10.14+, Ubuntu 18.04+
-- **Node.js**: 16.0+
+- **操作系统**: Windows 10+, macOS 12+, Ubuntu 18.04+（推荐 Ubuntu 22.04+）
+- **运行环境**: 预构建客户端自带兼容 Hexo 8 的 Node.js，无需单独安装 Node.js
+- **源码开发/构建**: Node.js 22.12.0+、Yarn 1.x
 - **内存**: 4GB 以上推荐
 - **硬盘**: 500MB 可用空间
 
@@ -185,7 +186,7 @@ hexo-pro-desktop/
 
 ## 技术栈
 
-- **框架**: Electron 28.x
+- **框架**: Electron 43.x
 - **前端**: React 18 + TypeScript + Ant Design
 - **后端**: Express.js + hexo-pro APIs
 - **构建**: Webpack + electron-builder
@@ -206,7 +207,9 @@ hexo-pro-desktop/
 ### 常见问题
 
 1. **启动失败**
-   - 检查 Node.js 版本是否为 16.0+
+   - 运行预构建客户端时，请使用更新后的安装包；升级系统 Node.js 不会更新旧客户端内置的 Node.js
+   - 从源码启动或构建时，检查 Node.js 版本是否为 22.12.0+
+   - Hexo 8 本身要求 Node.js 20.19.0+；客户端会在初始化前检查内置运行环境并给出升级提示
    - 确保没有其他应用占用端口 4000
    - 查看控制台错误信息
 
@@ -268,4 +271,4 @@ MIT License - 详见 [LICENSE](LICENSE) 文件
 - [hexo-pro](https://github.com/wuzheng228/hexo-pro) - 原始插件项目
 - [Electron](https://electronjs.org/) - 桌面应用框架
 - [React](https://reactjs.org/) - 前端框架
-- [Ant Design](https://ant.design/) - UI 组件库 
+- [Ant Design](https://ant.design/) - UI 组件库

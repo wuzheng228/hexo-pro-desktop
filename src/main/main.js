@@ -5,6 +5,7 @@ const { exec, spawn } = require('child_process');
 const { promisify } = require('util');
 const HexoProServer = require('./hexo-server');
 const AuthManager = require('./auth-manager');
+const { escapeHtml, isValidProjectName, getExternalUrl, isTrustedAppUrl, isTrustedSender, restrictNavigation, loadDialog, isDialogSender } = require('./desktop-security');
 let autoUpdater = null;
 
 try {
@@ -85,7 +86,7 @@ class HexoProDesktop {
     global.desktopAuthManager = this.authManager;
 
     // 等待 app ready 后初始化
-    app.whenReady().then(async () => {
+    this.authReady = app.whenReady().then(async () => {
       await this.initializeStore();
       // AuthManager现在使用共享的store，不需要单独初始化
       await this.authManager.loadAuthData();
@@ -159,14 +160,9 @@ class HexoProDesktop {
       this.authManager.setStore(store);
 
     } catch (error) {
-      console.error('初始化 electron-store 失败:', error);
-      // 提供一个简单的内存存储作为后备
-      store = {
-        get: () => null,
-        set: () => { },
-        delete: () => { },
-        clear: () => { }
-      };
+      console.error('初始化登录信息存储失败');
+      // A failed store must not report successful credential persistence.
+      store = null;
 
       // 也要设置给AuthManager
       this.authManager.setStore(store);
@@ -336,7 +332,8 @@ class HexoProDesktop {
         nodeIntegration: false,
         contextIsolation: true,
         enableRemoteModule: false,
-        sandbox: false,
+        sandbox: true,
+        additionalArguments: [`--hexo-pro-version=${app.getVersion()}`],
         webSecurity: true,
         allowRunningInsecureContent: false,
         experimentalFeatures: false,
@@ -347,6 +344,8 @@ class HexoProDesktop {
       show: false
     });
 
+    restrictNavigation(this.mainWindow, url => this.isTrustedMainUrl(url), url => shell.openExternal(url));
+
     // 窗口准备显示时显示
     this.mainWindow.once('ready-to-show', () => {
       this.mainWindow.show();
@@ -356,7 +355,7 @@ class HexoProDesktop {
     this.mainWindow.webContents.on('did-navigate-in-page', (event, navigationUrl) => {
       console.log('[Desktop]: 页面内导航到:', navigationUrl);
       // 如果是在主页面内的导航（非登录页），减少拦截器重新注入的频率
-      if (navigationUrl.includes('/pro') && !navigationUrl.includes('/pro')) {
+      if (this.isTrustedMainUrl(navigationUrl) && !navigationUrl.includes('/pro/login')) {
         console.log('[Desktop]: 主页面内导航，检查拦截器是否需要重新注入');
 
         // 检查拦截器是否还存在
@@ -452,11 +451,6 @@ class HexoProDesktop {
       });
     }
 
-    // 处理外部链接
-    this.mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-      shell.openExternal(url);
-      return { action: 'deny' };
-    });
   }
 
   // 保存窗口关闭前的状态
@@ -935,8 +929,10 @@ class HexoProDesktop {
         modal: true,
         parent: this.mainWindow,
         webPreferences: {
-          nodeIntegration: true,
-          contextIsolation: false
+          nodeIntegration: false,
+          contextIsolation: true,
+          sandbox: true,
+          preload: path.join(__dirname, 'dialog-preload.js')
         },
         title: '创建新项目'
       });
@@ -1050,7 +1046,7 @@ class HexoProDesktop {
           </div>
 
           <script>
-            const { ipcRenderer } = require('electron');
+            const dialogAPI = window.desktopDialog;
             const projectNameInput = document.getElementById('projectName');
             const createBtn = document.getElementById('createBtn');
             const errorMessage = document.getElementById('errorMessage');
@@ -1114,13 +1110,13 @@ class HexoProDesktop {
               const validation = validateProjectName(projectName);
               
               if (validation.isValid) {
-                ipcRenderer.send('project-name-result', { success: true, projectName });
+                dialogAPI.submitProjectName(projectName);
               }
             });
 
             // 取消按钮
             function cancel() {
-              ipcRenderer.send('project-name-result', { success: false });
+              dialogAPI.cancelProjectName();
             }
 
             // 回车键提交
@@ -1134,14 +1130,16 @@ class HexoProDesktop {
         </html>
       `;
 
-      inputWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+      loadDialog(inputWindow, html);
 
       // 处理结果
       // const { ipcMain } = require('electron');
       const handler = (event, result) => {
+        if (!isDialogSender(event, inputWindow) || !result || typeof result.success !== 'boolean') return;
+        if (result.success && !isValidProjectName(result.projectName)) return;
         ipcMain.removeListener('project-name-result', handler);
+        resolve({ success: result.success, projectName: result.success ? result.projectName : undefined });
         inputWindow.close();
-        resolve(result);
       };
 
       ipcMain.on('project-name-result', handler);
@@ -1174,8 +1172,10 @@ class HexoProDesktop {
         modal: true,
         parent: this.mainWindow,
         webPreferences: {
-          nodeIntegration: true,
-          contextIsolation: false
+          nodeIntegration: false,
+          contextIsolation: true,
+          sandbox: true,
+          preload: path.join(__dirname, 'dialog-preload.js')
         },
         title
       });
@@ -1192,7 +1192,7 @@ class HexoProDesktop {
         <html>
         <head>
           <meta charset="UTF-8">
-          <title>${title}</title>
+          <title>${escapeHtml(title)}</title>
           <style>
             body {
               font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
@@ -1282,25 +1282,25 @@ class HexoProDesktop {
             <div class="header">
               <div class="icon">${iconMap[type] || iconMap.info}</div>
               <div class="content">
-                <div class="message">${message}</div>
+                <div class="message">${escapeHtml(message)}</div>
               </div>
             </div>
-            <div class="detail">${detail}</div>
+            <div class="detail">${escapeHtml(detail)}</div>
             <div class="buttons">
-              <button type="button" class="btn-cancel" onclick="cancel()">${cancelLabel}</button>
-              <button type="button" class="btn-confirm" onclick="confirm()">${confirmLabel}</button>
+              <button type="button" class="btn-cancel" onclick="cancel()">${escapeHtml(cancelLabel)}</button>
+              <button type="button" class="btn-confirm" onclick="confirm()">${escapeHtml(confirmLabel)}</button>
             </div>
           </div>
 
           <script>
-            const { ipcRenderer } = require('electron');
+            const dialogAPI = window.desktopDialog;
 
             function confirm() {
-              ipcRenderer.send('custom-confirm-result', { confirmed: true });
+              dialogAPI.confirm(true);
             }
 
             function cancel() {
-              ipcRenderer.send('custom-confirm-result', { confirmed: false });
+              dialogAPI.confirm(false);
             }
 
             // 键盘事件
@@ -1316,13 +1316,14 @@ class HexoProDesktop {
         </html>
       `;
 
-      confirmWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+      loadDialog(confirmWindow, html);
 
       // 处理结果
       const handler = (event, result) => {
+        if (!isDialogSender(event, confirmWindow) || !result || typeof result.confirmed !== 'boolean') return;
         ipcMain.removeListener('custom-confirm-result', handler);
+        resolve({ confirmed: result.confirmed });
         confirmWindow.close();
-        resolve(result);
       };
 
       ipcMain.on('custom-confirm-result', handler);
@@ -1815,7 +1816,8 @@ class HexoProDesktop {
     app.setName('Hexo Pro Desktop');
 
     // 当应用准备好时创建窗口
-    app.whenReady().then(async () => {
+    const startup = app.whenReady().then(async () => {
+      await this.authReady;
       await this.createWindow();
       this.createMenu();
       this.setupAutoUpdater();
@@ -1932,6 +1934,8 @@ class HexoProDesktop {
 
     // 处理 IPC 消息
     this.setupIPC();
+
+    return startup;
   }
 
   // 清理资源的统一方法
@@ -1984,9 +1988,54 @@ class HexoProDesktop {
     }
   }
 
+  isTrustedMainUrl(url) {
+    return isTrustedAppUrl(url, path.join(__dirname, '../renderer/index.html'), this.hexoServer?.getUrl());
+  }
+
   setupIPC() {
+    const handle = (channel, listener) => ipcMain.handle(channel, (event, ...args) => {
+      if (!isTrustedSender(event, this.mainWindow, url => this.isTrustedMainUrl(url))) {
+        throw new Error('不允许的桌面调用来源');
+      }
+      return listener(event, ...args);
+    });
+
+    handle('auth-save-token', async (_event, token) => {
+      const operation = this.authOperationVersion = (this.authOperationVersion || 0) + 1;
+      const projectPath = this.currentProjectPath;
+      const server = this.hexoServer;
+      if (!projectPath || !server || typeof token !== 'string' || token.length > 16384 ||
+          !(await this.authManager.validateToken(server.getUrl(), token))) {
+        return { success: false, message: '登录令牌未通过验证' };
+      }
+      if (operation !== this.authOperationVersion || projectPath !== this.currentProjectPath || server !== this.hexoServer) {
+        return { success: false, message: '项目已切换，请重试' };
+      }
+      try {
+        await this.authManager.setToken(projectPath, token);
+        return { success: true };
+      } catch (_) {
+        if (!this.credentialWarningShown) {
+          this.credentialWarningShown = true;
+          dialog.showMessageBox(this.mainWindow, {
+            type: 'warning', message: '无法安全记住登录信息',
+            detail: '请解锁系统钥匙串后重试。当前登录仍可使用，关闭应用后需要重新登录。'
+          });
+        }
+        return { success: false, message: '系统安全存储不可用，未保存登录信息' };
+      }
+    });
+
+    handle('auth-clear-token', async () => {
+      this.authOperationVersion = (this.authOperationVersion || 0) + 1;
+      if (this.currentProjectPath) await this.authManager.clearToken(this.currentProjectPath);
+      this.lastValidatedToken = null;
+      this.lastValidationSuccess = false;
+      return { success: true };
+    });
+
     // 获取项目信息
-    ipcMain.handle('get-project-info', () => {
+    handle('get-project-info', () => {
       return {
         projectPath: this.safeStoreGet('lastProjectPath'),
         serverUrl: this.hexoServer ? this.hexoServer.getUrl() : null,
@@ -1995,7 +2044,7 @@ class HexoProDesktop {
     });
 
     // 打开项目
-    ipcMain.handle('open-project', async () => {
+    handle('open-project', async () => {
       if (this.isProjectLoading) {
         throw new Error('项目正在加载中，请稍候再试');
       }
@@ -2003,7 +2052,7 @@ class HexoProDesktop {
     });
 
     // 创建项目
-    ipcMain.handle('create-project', async () => {
+    handle('create-project', async () => {
       if (this.isProjectLoading) {
         throw new Error('项目正在加载中，请稍候再试');
       }
@@ -2011,7 +2060,7 @@ class HexoProDesktop {
     });
 
     // 选择文件夹
-    ipcMain.handle('select-folder', async () => {
+    handle('select-folder', async () => {
       const result = await dialog.showOpenDialog(this.mainWindow, {
         properties: ['openDirectory']
       });
@@ -2019,7 +2068,7 @@ class HexoProDesktop {
     });
 
     // 选择文件
-    ipcMain.handle('select-file', async (event, options = {}) => {
+    handle('select-file', async (event, options = {}) => {
       const result = await dialog.showOpenDialog(this.mainWindow, {
         properties: ['openFile'],
         filters: options.filters || []
@@ -2028,41 +2077,41 @@ class HexoProDesktop {
     });
 
     // 显示保存对话框
-    ipcMain.handle('show-save-dialog', async (event, options = {}) => {
+    handle('show-save-dialog', async (event, options = {}) => {
       const result = await dialog.showSaveDialog(this.mainWindow, options);
       return result.canceled ? null : result.filePath;
     });
 
     // 显示消息框
-    ipcMain.handle('show-message', async (event, options) => {
+    handle('show-message', async (event, options) => {
       const result = await dialog.showMessageBox(this.mainWindow, options);
       return result;
     });
 
     // 更新检查
-    ipcMain.handle('updater-check', async () => {
+    handle('updater-check', async () => {
       return this.checkForUpdates(true);
     });
 
-    ipcMain.handle('updater-download', async () => {
+    handle('updater-download', async () => {
       return this.downloadUpdate();
     });
 
-    ipcMain.handle('updater-install', async () => {
+    handle('updater-install', async () => {
       return this.installUpdate();
     });
 
-    ipcMain.handle('updater-get-state', () => {
+    handle('updater-get-state', () => {
       return this.updaterState;
     });
 
     // 打开外部链接
-    ipcMain.handle('open-external', async (event, url) => {
-      await shell.openExternal(url);
+    handle('open-external', async (event, url) => {
+      await shell.openExternal(getExternalUrl(url));
     });
 
     // 重启服务器
-    ipcMain.handle('restart-server', async () => {
+    handle('restart-server', async () => {
       if (this.hexoServer) {
         await this.hexoServer.restart();
         return this.hexoServer.getUrl();
@@ -2071,7 +2120,7 @@ class HexoProDesktop {
     });
 
     // 加载Web管理界面
-    ipcMain.handle('load-web-interface', async () => {
+    handle('load-web-interface', async () => {
       if (this.isProjectLoading) {
         console.log('[IPC]: 项目正在加载中，跳过Web界面加载请求');
         return false;
@@ -2092,7 +2141,7 @@ class HexoProDesktop {
     });
 
     // 强制重启应用（用于严重的端口问题）
-    ipcMain.handle('force-restart-app', async () => {
+    handle('force-restart-app', async () => {
       console.log('用户请求强制重启应用...');
       await this.cleanup();
       app.relaunch();
@@ -2100,7 +2149,7 @@ class HexoProDesktop {
     });
 
     // 验证 Hexo 项目
-    ipcMain.handle('validate-hexo-project', async (event, projectPath) => {
+    handle('validate-hexo-project', async (event, projectPath) => {
       return await this.validateHexoProject(projectPath);
     });
   }
@@ -2337,8 +2386,6 @@ class HexoProDesktop {
       await new Promise(resolve => setTimeout(resolve, 300));
 
       // 5. 如果有有效token且之前没有注入过相同的token，才注入
-      console.log('validToken:', validToken, this.lastTokenInjected, this.tokenInjectionAttempts, this.maxTokenInjectionAttempts);
-      console.log('lastTokenInjected:', this.lastTokenInjected);
       if (validToken && validToken !== this.lastTokenInjected && this.tokenInjectionAttempts < this.maxTokenInjectionAttempts) {
         console.log('[Desktop]: 步骤4: 发现有效且新的token，尝试注入...');
         this.tokenInjectionAttempts++;
@@ -2370,7 +2417,7 @@ class HexoProDesktop {
       console.log('[Desktop]: Web界面加载流程完成。');
 
     } catch (error) {
-      console.error('[Desktop]: 加载Web界面主流程失败:', error);
+      console.error('[Desktop]: 加载Web界面主流程失败');
       // 应急处理：即使主流程失败，也尝试注入拦截器
       try {
         console.warn('[Desktop]: 发生错误，尝试应急注入...');
@@ -2379,7 +2426,7 @@ class HexoProDesktop {
           await this.injectDesktopFeatures();
         }
       } catch (fallbackError) {
-        console.error('[Desktop]: 应急注入也失败:', fallbackError);
+        console.error('[Desktop]: 应急注入也失败');
       }
     } finally {
       // 清理状态
@@ -2404,12 +2451,6 @@ class HexoProDesktop {
       return null;
     }
 
-    // 如果token和上次验证的相同，且上次验证成功，跳过重复验证
-    if (token === this.lastValidatedToken && this.lastValidationSuccess) {
-      console.log('[Desktop]: Token与上次验证的相同且上次验证成功，跳过重复验证');
-      return token;
-    }
-
     // 验证token有效性
     console.log('[Desktop]: 开始验证token有效性...');
     try {
@@ -2426,15 +2467,15 @@ class HexoProDesktop {
       } else {
         console.log('[Desktop]: Token验证失败，清除无效token');
         // 清除AuthManager中的无效token
-        this.authManager.clearToken(this.currentProjectPath);
+        await this.authManager.clearToken(this.currentProjectPath);
         console.log('[Desktop]: 已从AuthManager中清除无效token，用户需要重新登录');
         return null;
       }
     } catch (error) {
-      console.error('[Desktop]: Token验证过程中出错:', error);
+      console.error('[Desktop]: Token验证过程中出错');
       // 验证出错时，为了安全起见，也清除token
       console.log('[Desktop]: 由于验证出错，清除token以确保安全');
-      this.authManager.clearToken(this.currentProjectPath);
+      await this.authManager.clearToken(this.currentProjectPath);
 
       // 记录验证失败
       this.lastValidatedToken = token;
@@ -2445,48 +2486,7 @@ class HexoProDesktop {
   }
 
   async validateTokenWithServer(serverUrl, token) {
-    try {
-      console.log('[Desktop]: 向服务器验证token...');
-
-      const response = await fetch(`${serverUrl}/hexopro/api/userInfo`, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        signal: AbortSignal.timeout(3000) // 缩短超时时间到3秒
-      });
-
-      console.log('[Desktop]: Token验证响应状态:', response.status);
-
-      if (response.ok) {
-        const data = await response.json();
-        console.log('[Desktop]: Token验证响应数据:', data);
-
-        // 检查是否返回了有效的用户信息且没有401错误码
-        if (data && data.code !== 401) {
-          console.log('[Desktop]: Token验证成功');
-          return true;
-        } else {
-          console.log('[Desktop]: Token验证失败 - 返回了401错误码');
-          return false;
-        }
-      } else if (response.status === 401) {
-        console.log('[Desktop]: Token验证失败 - 401未授权');
-        return false;
-      } else {
-        console.log('[Desktop]: Token验证失败 - 服务器错误:', response.status);
-        return false;
-      }
-    } catch (error) {
-      console.error('[Desktop]: Token验证请求失败:', error);
-      // 超时或网络错误时，为了避免影响用户体验，认为token可能有效
-      if (error.name === 'TimeoutError' || error.message.includes('timeout')) {
-        console.log('[Desktop]: Token验证超时，假设token有效以避免阻塞用户');
-        return true;
-      }
-      return false;
-    }
+    return this.authManager.validateToken(serverUrl, token);
   }
 
   async prepareTokenInjection() {
@@ -2496,15 +2496,6 @@ class HexoProDesktop {
     if (!this.currentProjectPath) {
       console.log('[Desktop]: 当前项目路径未设置，无法准备token');
       return null;
-    }
-
-    // 显示所有保存的token
-    const allTokens = {};
-    if (this.authManager && this.authManager.tokens) {
-      for (const [path, tokenValue] of this.authManager.tokens) {
-        allTokens[path] = tokenValue ? '存在' : '不存在';
-      }
-      console.log('[Desktop]: 所有保存的token:', allTokens);
     }
 
     const token = this.authManager.getToken(this.currentProjectPath);
@@ -2523,7 +2514,6 @@ class HexoProDesktop {
         // 验证token格式 - JWT应该是3个用.分隔的base64字符串
         const jwtPattern = /^[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]*$/;
         if (!jwtPattern.test(tokenToInject)) {
-          console.error('[Desktop]: Token格式无效，不是标准JWT格式:', tokenToInject.substring(0, 50) + '...');
           return false;
         }
 
@@ -2535,7 +2525,6 @@ class HexoProDesktop {
               // 验证接收到的token格式
               const jwtPattern = /^[A-Za-z0-9-_]+\\.[A-Za-z0-9-_]+\\.[A-Za-z0-9-_]*$/;
               if (!jwtPattern.test(token)) {
-                console.error('[Hexo Pro Desktop]: 接收到的token格式无效:', token.substring(0, 50) + '...');
                 return { success: false, message: 'Token格式无效' };
               }
               
@@ -2554,19 +2543,17 @@ class HexoProDesktop {
                 return { success: true, message: 'Token注入成功' };
               } else {
                 console.error('[Hexo Pro Desktop]: Token注入验证失败');
-                console.error('[Hexo Pro Desktop]: 期望:', token.substring(0, 50) + '...');
-                console.error('[Hexo Pro Desktop]: 实际:', savedToken ? savedToken.substring(0, 50) + '...' : 'null');
                 return { success: false, message: 'Token注入验证失败' };
               }
             } catch (error) {
-              console.error('[Hexo Pro Desktop]: Token注入过程中出错:', error);
-              return { success: false, message: error.message };
+              console.error('[Hexo Pro Desktop]: Token注入过程中出错');
+              return { success: false, message: '桌面登录处理失败' };
             }
           })();
         `;
 
         const result = await this.mainWindow.webContents.executeJavaScript(script);
-        console.log('[Desktop]: Token注入结果:', result);
+        console.log('[Desktop]: Token注入成功:', result?.success === true);
 
         return result && result.success;
 
@@ -2575,148 +2562,48 @@ class HexoProDesktop {
         return false;
       }
     } catch (error) {
-      console.error('[Desktop]: Token注入过程中发生异常:', error);
+      console.error('[Desktop]: Token注入过程中发生异常');
       console.log('[Desktop]: 继续执行，忽略token注入错误');
       return false;
     }
   }
 
   async injectLocalStorageInterceptor() {
+    if (!this.mainWindow || !this.isTrustedMainUrl(this.mainWindow.webContents.getURL())) return;
     try {
-      console.log('[Desktop]: 注入localStorage拦截器...');
-
-      const interceptorScript = `
-        (function() {
-          try {
-            // 检查是否已经注入过（通过检查localStorage.setItem是否已被重写）
-            const isAlreadyInjected = localStorage.setItem.toString().includes('Hexo Pro Desktop');
-            
-            if (isAlreadyInjected && window.hexoProDesktopInterceptorInjected) {
-              console.log('[Hexo Pro Desktop]: localStorage拦截器已存在，跳过重复注入');
-              return { success: true, message: '拦截器已存在' };
+      await this.mainWindow.webContents.executeJavaScript(`
+        (() => {
+          if (window.hexoProDesktopInterceptorInjected || !window.electronAPI?.auth) return;
+          const storage = Storage.prototype;
+          const originalSet = storage.setItem;
+          const originalRemove = storage.removeItem;
+          const originalClear = storage.clear;
+          const persist = value => window.electronAPI.auth.saveToken(value).catch(() => {});
+          storage.setItem = function(key, value) {
+            // Hexo Pro Desktop: persist only the current application's token.
+            originalSet.call(this, key, value);
+            if (this === window.localStorage && String(key) === 'hexoProToken' && value) {
+              persist(String(value));
             }
-            
-            console.log('[Hexo Pro Desktop]: 开始注入localStorage拦截器...');
-            
-            // 标记当前运行环境为桌面端
-            window.isHexoProDesktop = true;
-            window.hexoProDesktopInterceptorInjected = true;
-            
-            // 保存原始的localStorage.setItem方法（如果还没有保存的话）
-            if (!window.originalLocalStorageSetItem) {
-              window.originalLocalStorageSetItem = localStorage.setItem;
+          };
+          storage.removeItem = function(key) {
+            originalRemove.call(this, key);
+            if (this === window.localStorage && String(key) === 'hexoProToken') {
+              window.electronAPI.auth.clearToken().catch(() => {});
             }
-            
-            // 重写localStorage.setItem方法
-            localStorage.setItem = function(key, value) {
-              try {
-                // 先调用原始方法
-                window.originalLocalStorageSetItem.call(this, key, value);
-                console.log('[Hexo Pro Desktop]: localStorage.setItem被调用，key:', key, 'value长度:', value ? value.length : 0);
-                
-                // 如果是设置token，验证格式并同时保存到桌面端AuthManager
-                if (key === 'hexoProToken' && value) {
-                  console.log('[Hexo Pro Desktop]: 检测到token设置，开始验证格式');
-                  
-                  // 验证token格式 - JWT应该是3个用.分隔的base64字符串
-                  const jwtPattern = /^[A-Za-z0-9-_]+\\.[A-Za-z0-9-_]+\\.[A-Za-z0-9-_]*$/;
-                  if (!jwtPattern.test(value)) {
-                    console.error('[Hexo Pro Desktop]: Token格式无效，拒绝处理:', value.substring(0, 50) + '...');
-                    console.error('[Hexo Pro Desktop]: Token必须是标准JWT格式');
-                    return; // 不处理格式错误的token
-                  }
-                  
-                  console.log('[Hexo Pro Desktop]: Token格式验证通过，准备保存到桌面端AuthManager');
-                  console.log('[Hexo Pro Desktop]: Token内容预览:', value.substring(0, 20) + '...');
-                  
-                  // 立即验证localStorage中是否真的保存了token
-                  const savedToken = localStorage.getItem('hexoProToken');
-                  if (savedToken === value) {
-                    console.log('[Hexo Pro Desktop]: localStorage保存验证成功');
-                  } else {
-                    console.error('[Hexo Pro Desktop]: localStorage保存验证失败');
-                  }
-                  
-                  // 直接发送请求，不使用延时
-                  console.log('[Hexo Pro Desktop]: 开始发送保存token请求...');
-                  fetch('/hexopro/api/desktop/save-token', {
-                    method: 'POST',
-                    headers: {
-                      'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ token: value })
-                  }).then(function(response) {
-                    console.log('[Hexo Pro Desktop]: 保存token请求响应状态:', response.status);
-                    if (!response.ok) {
-                      console.error('[Hexo Pro Desktop]: 请求失败，状态码:', response.status);
-                    }
-                    return response.json();
-                  }).then(function(result) {
-                    console.log('[Hexo Pro Desktop]: 保存token响应结果:', result);
-                    if (result.success) {ƒ
-                      console.log('[Hexo Pro Desktop]: Token已成功保存到桌面端AuthManager');
-                    } else {
-                      console.error('[Hexo Pro Desktop]: 保存token到桌面端失败:', result.message);
-                    }
-                  }).catch(function(error) {
-                    console.error('[Hexo Pro Desktop]: 保存token到桌面端请求出错:', error);ƒ
-                  });
-                }
-              } catch (error) {
-                console.error('[Hexo Pro Desktop]: localStorage.setItem拦截器内部错误:', error);
-                // 如果拦截器出错，至少确保原始操作完成
-                try {
-                  window.originalLocalStorageSetItem.call(this, key, value);
-                } catch (fallbackError) {
-                  console.error('[Hexo Pro Desktop]: localStorage.setItem回退操作也失败:', fallbackError);
-                }
-              }
-            };
-            
-            // 添加全局调试函数
-            window.debugHexoProDesktop = function() {
-              console.log('[Hexo Pro Desktop Debug Info]:');
-              console.log('- 拦截器已注入:', window.hexoProDesktopInterceptorInjected);
-              console.log('- 是否桌面端:', window.isHexoProDesktop);
-              console.log('- 当前token:', localStorage.getItem('hexoProToken') ? '存在' : '不存在');
-              console.log('- localStorage.setItem已被重写:', localStorage.setItem.toString().includes('Hexo Pro Desktop'));
-              console.log('- 原始setItem已保存:', !!window.originalLocalStorageSetItem);
-            };
-            
-            // 定期检查拦截器是否还存在（防止被其他代码覆盖）
-            window.hexoProInterceptorChecker = setInterval(function() {
-              if (!localStorage.setItem.toString().includes('Hexo Pro Desktop')) {
-                console.warn('[Hexo Pro Desktop]: 检测到拦截器被覆盖，重新注入...');
-                window.hexoProDesktopInterceptorInjected = false;
-                // 触发重新注入（通过设置一个全局标记）
-                window.needReinjection = true;
-              }
-            }, 5000); // 每5秒检查一次
-            
-            console.log('[Hexo Pro Desktop]: localStorage拦截器注入成功');
-            console.log('[Hexo Pro Desktop]: 使用 window.debugHexoProDesktop() 查看调试信息');
-            return { success: true, message: 'localStorage拦截器注入成功' };
-            
-          } catch (error) {
-            console.error('[Hexo Pro Desktop]: localStorage拦截器注入失败:', error);
-            return { success: false, message: error.message };
-          }
+          };
+          storage.clear = function() {
+            originalClear.call(this);
+            if (this === window.localStorage) window.electronAPI.auth.clearToken().catch(() => {});
+          };
+          window.isHexoProDesktop = true;
+          window.hexoProDesktopInterceptorInjected = true;
+          const existing = localStorage.getItem('hexoProToken');
+          if (existing) persist(existing);
         })();
-      `;
-
-      const result = await this.mainWindow.webContents.executeJavaScript(interceptorScript);
-      console.log('[Desktop]: localStorage拦截器注入结果:', result);
-
-      if (result && result.success) {
-        console.log('[Desktop]: localStorage拦截器注入成功');
-      } else {
-        console.error('[Desktop]: localStorage拦截器注入失败:', result ? result.message : '未知错误');
-      }
-
-    } catch (error) {
-      console.error('[Desktop]: localStorage拦截器注入异常:', error);
-      // 不抛出错误，避免影响整个应用
-      console.log('[Desktop]: 继续执行，localStorage拦截器注入失败但不影响基本功能');
+      `);
+    } catch (_) {
+      console.warn('[Desktop]: 未能连接安全登录存储');
     }
   }
 
@@ -2818,7 +2705,6 @@ class HexoProDesktop {
             const jwtPattern = /^[A-Za-z0-9-_]+\\.[A-Za-z0-9-_]+\\.[A-Za-z0-9-_]*$/;
             if (!jwtPattern.test(token)) {
               console.warn('[Hexo Pro Desktop]: 发现格式无效的token，清理中...');
-              console.warn('[Hexo Pro Desktop]: 无效token内容:', token.substring(0, 100) + '...');
               localStorage.removeItem('hexoProToken');
               return { success: true, message: '已清理无效token', cleaned: true };
             }
@@ -2826,22 +2712,22 @@ class HexoProDesktop {
             console.log('[Hexo Pro Desktop]: Token格式正常，无需清理');
             return { success: true, message: 'Token格式正常', cleaned: false };
           } catch (error) {
-            console.error('[Hexo Pro Desktop]: 清理token时出错:', error);
+            console.error('[Hexo Pro Desktop]: 清理token时出错');
             // 出错时也尝试清理token
             try {
               localStorage.removeItem('hexoProToken');
             } catch (e) {}
-            return { success: false, message: error.message, cleaned: true };
+            return { success: false, message: '清理登录信息失败', cleaned: true };
           }
         })();
       `;
 
       const result = await this.mainWindow.webContents.executeJavaScript(script);
-      console.log('[Desktop]: Token清理结果:', result);
+      console.log('[Desktop]: Token清理完成:', result?.success === true);
 
       return result && result.cleaned;
     } catch (error) {
-      console.error('[Desktop]: 清理token过程中发生异常:', error);
+      console.error('[Desktop]: 清理token过程中发生异常');
       return false;
     }
   }
@@ -2855,8 +2741,10 @@ class HexoProDesktop {
       modal: true,
       parent: this.mainWindow,
       webPreferences: {
-        nodeIntegration: true,
-        contextIsolation: false
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: true,
+        preload: path.join(__dirname, 'dialog-preload.js')
       },
       title: '创建项目中...'
     });
@@ -2981,10 +2869,11 @@ class HexoProDesktop {
           </div>
           <div class="log-container" id="logContainer"></div>
           <div id="resultMessage"></div>
+          <div id="buttonsContainer" style="display: none;"><button onclick="closeWindow()">关闭</button></div>
         </div>
 
         <script>
-          const { ipcRenderer } = require('electron');
+          const dialogAPI = window.desktopDialog;
           const logContainer = document.getElementById('logContainer');
           const currentStep = document.getElementById('currentStep');
           const resultMessage = document.getElementById('resultMessage');
@@ -2999,21 +2888,27 @@ class HexoProDesktop {
           }
 
           function updateStep(step) {
-            currentStep.innerHTML = '<span class="loading-spinner"></span>' + step;
+            currentStep.replaceChildren();
+            const spinner = document.createElement('span');
+            spinner.className = 'loading-spinner';
+            currentStep.append(spinner, document.createTextNode(String(step)));
           }
 
           function showResult(success, message) {
             currentStep.innerHTML = success ? '✅ 创建完成' : '❌ 创建失败';
-            resultMessage.innerHTML = \`<div class="\${success ? 'success' : 'error'}-message">\${message}</div>\`;
-            buttonsContainer.style.display = 'block';
+            const result = document.createElement('div');
+            result.className = (success ? 'success' : 'error') + '-message';
+            result.textContent = String(message);
+            resultMessage.replaceChildren(result);
+            if (buttonsContainer) buttonsContainer.style.display = 'block';
           }
 
           function closeWindow() {
-            ipcRenderer.send('close-progress-window');
+            dialogAPI.closeProgress();
           }
 
           // 接收进度更新
-          ipcRenderer.on('progress-update', (event, data) => {
+          const unsubscribeProgress = dialogAPI.onProgress((data) => {
             if (data.step) {
               updateStep(data.step);
             }
@@ -3027,31 +2922,17 @@ class HexoProDesktop {
 
           // 窗口关闭时清理
           window.addEventListener('beforeunload', () => {
-            ipcRenderer.send('close-progress-window');
+            unsubscribeProgress();
           });
         </script>
       </body>
       </html>
     `;
 
-    progressWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(progressHtml)}`);
-
-    // 开始创建项目
-    try {
-      await this.performProjectCreation(projectPath, projectName, progressWindow);
-    } catch (error) {
-      console.error('[创建项目]: 项目创建过程中出错:', error);
-      progressWindow.webContents.send('progress-update', {
-        result: {
-          success: false,
-          message: `创建项目失败: ${error.message}`
-        }
-      });
-    }
-
     // 处理窗口关闭
     // const { ipcMain } = require('electron');
-    const closeHandler = () => {
+    const closeHandler = (event) => {
+      if (!isDialogSender(event, progressWindow)) return;
       ipcMain.removeListener('close-progress-window', closeHandler);
       console.log('[创建项目]: 窗口关闭');
       if (!progressWindow.isDestroyed()) {
@@ -3063,6 +2944,23 @@ class HexoProDesktop {
     progressWindow.on('closed', () => {
       ipcMain.removeListener('close-progress-window', closeHandler);
     });
+
+    await loadDialog(progressWindow, progressHtml);
+
+    // 开始创建项目
+    try {
+      await this.performProjectCreation(projectPath, projectName, progressWindow);
+    } catch (error) {
+      console.error('[创建项目]: 项目创建过程中出错:', error);
+      if (!progressWindow.isDestroyed()) progressWindow.webContents.send('progress-update', {
+        result: {
+          success: false,
+          message: `创建项目失败: ${error.message}`
+        }
+      });
+    }
+
+
   }
 
   // 执行实际的项目创建
@@ -3156,8 +3054,10 @@ class HexoProDesktop {
       modal: true,
       parent: this.mainWindow,
       webPreferences: {
-        nodeIntegration: true,
-        contextIsolation: false
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: true,
+        preload: path.join(__dirname, 'dialog-preload.js')
       },
       title: '加载项目中...',
       frame: false,
@@ -3255,7 +3155,7 @@ class HexoProDesktop {
           <div class="loading-spinner"></div>
           <div class="loading-title">正在加载项目</div>
           <div class="loading-subtitle">项目名称：</div>
-          <div class="project-name">${projectName}</div>
+          <div class="project-name">${escapeHtml(projectName)}</div>
           <div class="loading-steps">
             <div class="step active" id="step1">验证项目结构</div>
             <div class="step" id="step2">停止现有服务</div>
@@ -3265,7 +3165,7 @@ class HexoProDesktop {
         </div>
 
         <script>
-          const { ipcRenderer } = require('electron');
+          const dialogAPI = window.desktopDialog;
           
           let currentStep = 1;
           
@@ -3288,20 +3188,20 @@ class HexoProDesktop {
           }
           
           // 接收步骤更新
-          ipcRenderer.on('loading-step-update', (event, stepNumber, completed) => {
+          const unsubscribeStep = dialogAPI.onLoadingStep((stepNumber, completed) => {
             updateStep(stepNumber, completed);
           });
           
           // 窗口关闭时清理
           window.addEventListener('beforeunload', () => {
-            ipcRenderer.removeAllListeners('loading-step-update');
+            unsubscribeStep();
           });
         </script>
       </body>
       </html>
     `;
 
-    this.loadingWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHtml)}`);
+    loadDialog(this.loadingWindow, loadingHtml);
 
     // 窗口关闭时清理
     this.loadingWindow.on('closed', () => {
@@ -3337,8 +3237,10 @@ class HexoProDesktop {
       modal: true,
       parent: this.mainWindow,
       webPreferences: {
-        nodeIntegration: true,
-        contextIsolation: false
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: true,
+        preload: path.join(__dirname, 'dialog-preload.js')
       },
       title: '关闭项目中...',
       frame: false,
@@ -3431,7 +3333,7 @@ class HexoProDesktop {
         </div>
 
         <script>
-          const { ipcRenderer } = require('electron');
+          const dialogAPI = window.desktopDialog;
           
           let currentStep = 1;
           
@@ -3454,20 +3356,20 @@ class HexoProDesktop {
           }
           
           // 接收步骤更新
-          ipcRenderer.on('loading-step-update', (event, stepNumber, completed) => {
+          const unsubscribeStep = dialogAPI.onLoadingStep((stepNumber, completed) => {
             updateStep(stepNumber, completed);
           });
           
           // 窗口关闭时清理
           window.addEventListener('beforeunload', () => {
-            ipcRenderer.removeAllListeners('loading-step-update');
+            unsubscribeStep();
           });
         </script>
       </body>
       </html>
     `;
 
-    this.loadingWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHtml)}`);
+    loadDialog(this.loadingWindow, loadingHtml);
 
     // 窗口关闭时清理
     this.loadingWindow.on('closed', () => {
@@ -3476,6 +3378,4 @@ class HexoProDesktop {
   }
 }
 
-// 创建应用实例并初始化
-const hexoProDesktop = new HexoProDesktop();
-hexoProDesktop.initialize().catch(console.error); 
+module.exports = HexoProDesktop;

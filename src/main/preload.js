@@ -1,30 +1,12 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-// 安全地导入模块，添加错误处理
-let pathModule;
-try {
-  pathModule = require('path');
-} catch (error) {
-  console.error('Failed to load path module:', error);
-  pathModule = {
-    join: (...args) => args.join('/'),
-    dirname: (p) => p.split('/').slice(0, -1).join('/'),
-    basename: (p) => p.split('/').pop(),
-    extname: (p) => {
-      const name = p.split('/').pop();
-      const lastDot = name.lastIndexOf('.');
-      return lastDot > 0 ? name.slice(lastDot) : '';
-    },
-    resolve: (...args) => args.join('/')
-  };
-}
-
-let electronApp;
-try {
-  electronApp = require('electron').app;
-} catch (error) {
-  console.error('Failed to load electron app:', error);
-  electronApp = { getVersion: () => '1.0.0' };
+const appVersion = process.argv.find(argument => argument.startsWith('--hexo-pro-version='))?.slice('--hexo-pro-version='.length) || '';
+const eventChannels = new Set(['project-loaded', 'create-new-project', 'open-settings', 'updater-status']);
+function subscribe(channel, callback) {
+  if (typeof callback !== 'function') throw new TypeError('Expected a callback');
+  const listener = (_event, data) => callback(data);
+  ipcRenderer.on(channel, listener);
+  return () => ipcRenderer.removeListener(channel, listener);
 }
 
 // 向渲染进程暴露安全的 API
@@ -56,13 +38,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   forceRestartApp: () => ipcRenderer.invoke('force-restart-app'),
   
   // 事件监听
-  onProjectLoaded: (callback) => {
-    ipcRenderer.on('project-loaded', (event, data) => callback(data));
-  },
+  onProjectLoaded: callback => subscribe('project-loaded', callback),
   
-  onCreateNewProject: (callback) => {
-    ipcRenderer.on('create-new-project', (event, projectPath) => callback(projectPath));
-  },
+  onCreateNewProject: callback => subscribe('create-new-project', callback),
   
   onOpenSettings: (callback) => {
     const listener = (event, payload) => callback(payload);
@@ -72,20 +50,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   
   // 移除事件监听器
   removeAllListeners: (channel) => {
-    ipcRenderer.removeAllListeners(channel);
+    if (eventChannels.has(channel)) ipcRenderer.removeAllListeners(channel);
   },
   
   // 平台信息
   platform: process.platform,
   
   // 应用信息
-  getAppVersion: () => {
-    try {
-      return electronApp.getVersion();
-    } catch (error) {
-      console.error('Failed to get app version:', error);
-      return '1.0.0';
-    }
+  getAppVersion: () => appVersion,
+
+  auth: {
+    saveToken: token => ipcRenderer.invoke('auth-save-token', token),
+    clearToken: () => ipcRenderer.invoke('auth-clear-token')
   },
 
   // 自动更新
@@ -122,31 +98,3 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 通用功能
   showInFolder: (path) => ipcRenderer.invoke('show-in-folder', path)
 });
-
-// 暴露一些有用的 Node.js API（只读）
-contextBridge.exposeInMainWorld('nodeAPI', {
-  path: {
-    join: pathModule.join,
-    dirname: pathModule.dirname,
-    basename: pathModule.basename,
-    extname: pathModule.extname,
-    resolve: pathModule.resolve
-  },
-  
-  // 环境变量（只读）
-  env: {
-    NODE_ENV: process.env.NODE_ENV,
-    HOME: process.env.HOME,
-    USERPROFILE: process.env.USERPROFILE
-  }
-});
-
-// 服务器控制
-ipcRenderer.on('restart-server', () => {
-  // 实现服务器重启逻辑
-});
-
-// 导航控制
-ipcRenderer.on('load-web-interface', () => {
-  // 实现加载 Web 接口逻辑
-}); 

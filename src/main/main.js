@@ -818,104 +818,40 @@ class HexoProDesktop {
   }
 
   async createNewProject() {
+    if (this.isCreatingProject) return;
+    this.isCreatingProject = true;
     try {
-      console.log('[创建项目]: 开始创建新项目流程...');
+      const { showProjectSourceDialog } = require('./project-source-dialog');
+      const selection = await showProjectSourceDialog(this.mainWindow);
+      if (!selection.success) return;
 
-      // 1. 检查系统依赖
-      console.log('[创建项目]: 检查系统依赖...');
-      const dependencies = await this.checkSystemDependencies();
-
-      if (!dependencies.npm || !dependencies.hexoCli) {
-        const missingDeps = dependencies.errors.join('\n');
-        const result = await dialog.showMessageBox(this.mainWindow, {
-          type: 'error',
-          title: '缺少必要依赖',
-          message: '创建Hexo项目需要以下依赖：',
-          detail: `${missingDeps}\n\n请先安装缺少的依赖后再创建项目。\n\n安装方法：\n1. 安装 Node.js (包含npm)\n2. 运行命令: npm install hexo-cli -g`,
-          buttons: ['取消', '继续创建', '打开安装指南'],
-          defaultId: 0,
-          cancelId: 0
-        });
-
-        if (result.response === 0) {
-          return; // 用户选择取消
-        } else if (result.response === 2) {
-          // 打开安装指南
-          shell.openExternal('https://hexo.io/zh-cn/docs/');
+      if (selection.source === 'template') {
+        const dependencies = await this.checkSystemDependencies();
+        if (!dependencies.npm || !dependencies.hexoCli) {
+          await dialog.showMessageBox(this.mainWindow, {
+            type: 'error', title: '缺少必要依赖', message: '新建空白博客需要 npm 和 Hexo CLI',
+            detail: dependencies.errors.join('\n'), buttons: ['知道了']
+          });
           return;
         }
-        // 用户选择继续创建，尝试继续（可能有些依赖实际存在但检查失败）
       }
-
-      // 2. 选择父目录
-      console.log('[创建项目]: 选择项目父目录...');
       const result = await dialog.showOpenDialog(this.mainWindow, {
-        properties: ['openDirectory', 'createDirectory'],
-        title: '选择新博客项目的父目录'
+        properties: ['openDirectory', 'createDirectory'], title: '选择新博客项目的父目录'
       });
-
-      if (result.canceled || !result.filePaths.length) {
-        console.log('[创建项目]: 用户取消目录选择');
-        return;
-      }
-
-      const parentDir = result.filePaths[0];
-      console.log('[创建项目]: 选择的父目录:', parentDir);
-
-      // 3. 输入项目名称
-      console.log('[创建项目]: 请求项目名称输入...');
-      const projectNameResult = await this.showProjectNameDialog();
-
-      if (!projectNameResult.success) {
-        console.log('[创建项目]: 用户取消项目名称输入');
-        return;
-      }
-
-      const projectName = projectNameResult.projectName;
-      const projectPath = path.join(parentDir, projectName);
-
-      // 4. 检查项目目录是否已存在
+      if (result.canceled || !result.filePaths.length) return;
+      const projectPath = path.join(result.filePaths[0], selection.projectName);
       if (await fs.pathExists(projectPath)) {
-        const overwriteResult = await this.showCustomConfirmDialog({
-          title: '目录已存在',
-          message: `目录 "${projectName}" 已存在`,
-          detail: `是否要覆盖现有目录？这将删除目录中的所有内容。
-
-注意事项：
-• 此操作不可撤销
-• 目录中的所有文件和子目录都将被永久删除  
-• 请确保您不需要保留现有内容
-• 建议在操作前备份重要数据
-
-风险说明：
-- 覆盖后无法恢复原有数据
-- 如果目录中有重要文件，请先进行备份
-- 建议选择其他目录名称以避免冲突
-
-确认要继续吗？`,
-          confirmLabel: '覆盖',
-          cancelLabel: '取消',
-          width: 500,
-          height: 500,
-          type: 'warning'
+        await dialog.showMessageBox(this.mainWindow, {
+          type: 'info', title: '项目目录已存在', message: '请选择其他项目名称或保存位置',
+          detail: `已有目录将保留：${projectPath}`, buttons: ['知道了']
         });
-
-        if (!overwriteResult.confirmed) {
-          console.log('[创建项目]: 用户取消覆盖');
-          return;
-        }
-
-        // 删除现有目录
-        console.log('[创建项目]: 删除现有目录:', projectPath);
-        await fs.remove(projectPath);
+        return;
       }
-
-      // 5. 显示进度对话框并创建项目
-      await this.createProjectWithProgress(projectPath, projectName);
-
+      await this.createProjectWithProgress(projectPath, selection.projectName, selection);
     } catch (error) {
-      console.error('[创建项目]: 创建项目失败:', error);
-      dialog.showErrorBox('创建项目失败', `创建项目时出现错误：\n${error.message}`);
+      dialog.showErrorBox('创建项目失败', error.message);
+    } finally {
+      this.isCreatingProject = false;
     }
   }
 
@@ -1379,7 +1315,7 @@ class HexoProDesktop {
       // 检查基本文件和目录
       const configPath = path.join(projectPath, '_config.yml');
       const packagePath = path.join(projectPath, 'package.json');
-      const sourcePath = path.join(projectPath, 'source');
+      let sourcePath = path.join(projectPath, 'source');
       const themesPath = path.join(projectPath, 'themes');
 
       // 检查 _config.yml 是否存在
@@ -1398,6 +1334,13 @@ class HexoProDesktop {
         };
       }
 
+      // Imported blogs may use a custom source directory.
+      const settings = require('js-yaml').load(await fs.readFile(configPath, 'utf8'));
+      if (settings?.source_dir) sourcePath = path.resolve(projectPath, settings.source_dir);
+      const sourceRelative = path.relative(projectPath, sourcePath);
+      if (!sourceRelative || sourceRelative === '..' || sourceRelative.startsWith(`..${path.sep}`) || path.isAbsolute(sourceRelative)) {
+        return { isValid: false, message: 'source_dir 必须是项目内的独立目录' };
+      }
       // 检查 source 目录是否存在
       if (!await fs.pathExists(sourcePath)) {
         return {
@@ -2733,7 +2676,7 @@ class HexoProDesktop {
   }
 
   // 带进度的项目创建
-  async createProjectWithProgress(projectPath, projectName) {
+  async createProjectWithProgress(projectPath, projectName, selection = { source: 'template' }) {
     const progressWindow = new BrowserWindow({
       width: 500,
       height: 600,
@@ -2949,7 +2892,8 @@ class HexoProDesktop {
 
     // 开始创建项目
     try {
-      await this.performProjectCreation(projectPath, projectName, progressWindow);
+      if (selection.source === 'github') await this.performProjectImport(projectPath, selection, progressWindow);
+      else await this.performProjectCreation(projectPath, projectName, progressWindow);
     } catch (error) {
       console.error('[创建项目]: 项目创建过程中出错:', error);
       if (!progressWindow.isDestroyed()) progressWindow.webContents.send('progress-update', {
@@ -2961,6 +2905,24 @@ class HexoProDesktop {
     }
 
 
+  }
+
+  async performProjectImport(projectPath, selection, progressWindow) {
+    const sendProgress = (step, log) => {
+      if (!progressWindow.isDestroyed()) progressWindow.webContents.send('progress-update', { step, log });
+    };
+    const { importGitHubProject } = require('./github-project');
+    await importGitHubProject(projectPath, selection, { onProgress: step => sendProgress(step) });
+    try {
+      sendProgress('正在安装博客依赖…');
+      const installCommand = await fs.pathExists(path.join(projectPath, 'package-lock.json')) ? 'npm ci' : 'npm install';
+      await this.executeCommand(`${installCommand} --no-audit --no-fund`, projectPath, output => sendProgress(null, output.data.trim()));
+      sendProgress('正在打开导入的博客…');
+      await this.loadProject(projectPath);
+      if (!progressWindow.isDestroyed()) progressWindow.close();
+    } catch (error) {
+      throw new Error(`源码已保留在 ${projectPath}。${error.message}。请完成依赖安装后重新打开博客。`);
+    }
   }
 
   // 执行实际的项目创建

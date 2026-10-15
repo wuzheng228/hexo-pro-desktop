@@ -3,6 +3,7 @@
 const fs = require('fs-extra');
 const path = require('path');
 const { spawn } = require('child_process');
+const { MINIMUM_DEVELOPMENT_NODE_VERSION, assertSupportedDevelopmentRuntime } = require('./src/main/runtime-compatibility');
 
 // 颜色输出
 const colors = {
@@ -46,14 +47,8 @@ async function checkEnvironment() {
   
   // 检查 Node.js 版本
   const nodeVersion = process.version;
-  const majorVersion = parseInt(nodeVersion.slice(1).split('.')[0]);
-  
-  if (majorVersion >= 16) {
-    logSuccess(`Node.js 版本: ${nodeVersion}`);
-  } else {
-    logError(`Node.js 版本过低: ${nodeVersion}，需要 16.0 或更高版本`);
-    process.exit(1);
-  }
+  assertSupportedDevelopmentRuntime(process.versions);
+  logSuccess(`Node.js 版本: ${nodeVersion}`);
 
   // 检查 Yarn 是否安装
   try {
@@ -193,7 +188,7 @@ async function showHelp() {
   log('  help         显示帮助信息', 'yellow');
   
   log('\n环境要求:');
-  log('  - Node.js 16.0+');
+  log(`  - 源码开发和构建: Node.js ${MINIMUM_DEVELOPMENT_NODE_VERSION}+`);
   log('  - Yarn 1.x+');
   log('  - 项目结构: hexo-pro/, hexo-pro-client/, hexo-pro-desktop/');
   
@@ -242,4 +237,4 @@ process.on('uncaughtException', (error) => {
 
 if (require.main === module) {
   main();
-} 
+}

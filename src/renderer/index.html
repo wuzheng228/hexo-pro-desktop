@@ -150,8 +150,6 @@
     <script>
         class HexoProDesktop {
             constructor() {
-                this.apiBaseUrl = 'http://localhost:4000/hexopro/api';
-                this.webUrl = 'http://localhost:4000/pro';
                 this.startTime = Date.now();
                 this.connectionFailureCount = 0;
                 // 冷启动阶段服务可能尚未监听端口，避免短暂闪现错误提示
@@ -172,7 +170,10 @@
                 const elapsedMs = Date.now() - this.startTime;
                 
                 try {
-                    const response = await fetch(`${this.apiBaseUrl}/desktop/status`, { cache: 'no-store' });
+                    const { serverUrl } = await window.electronAPI.getProjectInfo();
+                    if (!serverUrl) throw new Error('当前应用的服务器尚未就绪');
+                    const response = await fetch(new URL('/hexopro/api/desktop/status', serverUrl).href, { cache: 'no-store' });
+                    if (!response.ok) throw new Error(`服务器状态检查失败 (${response.status})`);
                     const data = await response.json();
                     this.connectionFailureCount = 0;
                     

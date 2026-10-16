@@ -1,10 +1,11 @@
 const { app, BrowserWindow, Menu, dialog, shell, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs-extra');
-const { exec, spawn } = require('child_process');
-const { promisify } = require('util');
-const HexoProServer = require('./hexo-server');
+const HexoProServer = require('./hexo-server-process');
+const { getDesktopRuntime } = require('./bundled-runtime');
+const { createProject, prepareProject } = require('./project-setup');
 const AuthManager = require('./auth-manager');
+const { DesktopUpdater } = require('./desktop-updater');
 const { escapeHtml, isValidProjectName, getExternalUrl, isTrustedAppUrl, isTrustedSender, restrictNavigation, loadDialog, isDialogSender } = require('./desktop-security');
 let autoUpdater = null;
 
@@ -14,7 +15,6 @@ try {
   console.warn('[Updater]: electron-updater 未安装，自动更新功能不可用:', error.message);
 }
 
-const execAsync = promisify(exec);
 
 // Windows编码处理
 let iconv;
@@ -69,18 +69,10 @@ class HexoProDesktop {
     // 添加项目加载状态管理
     this.isProjectLoading = false;
 
-    // 自动更新状态
     this.autoUpdaterSupported = Boolean(autoUpdater);
-    this.autoUpdaterInitialized = false;
-    this.userInitiatedUpdateCheck = false;
-    this.updaterState = {
-      status: 'idle',
-      currentVersion: app.getVersion(),
-      availableVersion: null,
-      progress: 0,
-      error: null,
-      lastCheckedAt: null
-    };
+    this.updater = null;
+    this.quitCleanup = null;
+    this.quitReady = false;
 
     // 设置全局变量，供HexoProServer访问
     global.desktopAuthManager = this.authManager;
@@ -186,138 +178,67 @@ class HexoProDesktop {
     }
   }
 
-  isAutoUpdateAvailable() {
-    return this.autoUpdaterSupported && app.isPackaged;
-  }
-
-  setUpdaterState(partialState = {}) {
-    this.updaterState = {
-      ...this.updaterState,
-      ...partialState
-    };
-
-    if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-      this.mainWindow.webContents.send('updater-status', this.updaterState);
-    }
-  }
-
   setupAutoUpdater() {
-    if (!this.isAutoUpdateAvailable() || this.autoUpdaterInitialized) {
-      return;
-    }
-
-    this.autoUpdaterInitialized = true;
-    autoUpdater.autoDownload = false;
-    autoUpdater.autoInstallOnAppQuit = true;
-
-    autoUpdater.on('checking-for-update', () => {
-      this.setUpdaterState({
-        status: 'checking',
-        error: null,
-        progress: 0,
-        lastCheckedAt: new Date().toISOString()
-      });
+    if (this.updater) return this.updater;
+    this.updater = new DesktopUpdater({
+      updater: autoUpdater,
+      version: app.getVersion(),
+      isPackaged: app.isPackaged,
+      autoDownload: this.safeStoreGet('autoDownloadUpdates'),
+      saveAutoDownload: enabled => {
+        if (!store) throw new Error('桌面设置存储不可用，请重启应用后重试');
+        store.set('autoDownloadUpdates', enabled);
+      },
+      onState: state => {
+        if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+          this.mainWindow.webContents.send('updater-status', state);
+        }
+      },
+      confirmInstall: async version => {
+        const options = {
+          type: 'question',
+          title: '重启安装更新',
+          message: `新版本 ${version} 已下载完成`,
+          detail: '请先保存正在编辑的内容。重启后将安装更新，并重新打开应用。',
+          buttons: ['稍后', '重启安装'],
+          defaultId: 0,
+          cancelId: 0,
+          noLink: true
+        };
+        const result = this.mainWindow && !this.mainWindow.isDestroyed()
+          ? await dialog.showMessageBox(this.mainWindow, options)
+          : await dialog.showMessageBox(options);
+        return result.response === 1;
+      },
+      beforeInstall: async () => {
+        if (!await this.canCloseMainWindow()) throw new Error('文章仍有未保存的内容，请保存成功后再重启安装');
+        // Squirrel.Mac closes windows before before-quit; do not hide the window instead.
+        app.isQuittingApp = true;
+      },
+      onInstallError: () => { app.isQuittingApp = false; }
     });
-
-    autoUpdater.on('update-available', (info) => {
-      this.userInitiatedUpdateCheck = false;
-      this.setUpdaterState({
-        status: 'update-available',
-        availableVersion: info?.version || null,
-        error: null,
-        progress: 0
-      });
-    });
-
-    autoUpdater.on('update-not-available', () => {
-      this.setUpdaterState({
-        status: 'up-to-date',
-        availableVersion: null,
-        progress: 0,
-        error: null
-      });
-
-      this.userInitiatedUpdateCheck = false;
-    });
-
-    autoUpdater.on('download-progress', (progressObj) => {
-      const percent = Number((progressObj?.percent || 0).toFixed(1));
-      this.setUpdaterState({
-        status: 'downloading',
-        progress: percent,
-        error: null
-      });
-    });
-
-    autoUpdater.on('update-downloaded', (info) => {
-      this.setUpdaterState({
-        status: 'downloaded',
-        availableVersion: info?.version || this.updaterState.availableVersion,
-        progress: 100,
-        error: null
-      });
-    });
-
-    autoUpdater.on('error', (error) => {
-      const msg = error?.message || String(error);
-      this.setUpdaterState({
-        status: 'error',
-        error: msg
-      });
-
-      this.userInitiatedUpdateCheck = false;
-    });
+    this.updater.start();
+    return this.updater;
   }
 
-  async checkForUpdates(userInitiated = false) {
-    if (userInitiated) {
-      this.userInitiatedUpdateCheck = true;
-    }
-
-    if (!this.autoUpdaterSupported) {
-      const message = '未安装 electron-updater，自动更新不可用';
-      this.setUpdaterState({ status: 'disabled', error: message });
-      this.userInitiatedUpdateCheck = false;
-      return { supported: false, message };
-    }
-
-    if (!app.isPackaged) {
-      const message = '开发模式下不支持自动更新检查';
-      this.setUpdaterState({ status: 'disabled', error: message });
-      this.userInitiatedUpdateCheck = false;
-      return { supported: false, message };
-    }
-
-    this.setupAutoUpdater();
-    try {
-      await autoUpdater.checkForUpdates();
-    } catch (error) {
-      this.userInitiatedUpdateCheck = false;
-      throw error;
-    }
-    return { supported: true };
+  checkForUpdates() {
+    return this.setupAutoUpdater().checkForUpdates();
   }
 
-  async downloadUpdate() {
-    if (!this.isAutoUpdateAvailable()) {
-      return { supported: false };
-    }
-
-    this.setupAutoUpdater();
-    await autoUpdater.downloadUpdate();
-    return { supported: true };
+  downloadUpdate() {
+    return this.setupAutoUpdater().downloadUpdate();
   }
 
   installUpdate() {
-    if (!this.isAutoUpdateAvailable()) {
-      return { supported: false };
-    }
+    return this.setupAutoUpdater().installUpdate();
+  }
 
-    this.setUpdaterState({ status: 'installing' });
-    setImmediate(() => {
-      autoUpdater.quitAndInstall(false, true);
-    });
-    return { supported: true };
+  async canCloseMainWindow() {
+    if (!this.mainWindow || this.mainWindow.isDestroyed()) return true;
+    // Honor the editor's pending-save guard without closing the window or stopping its server.
+    return this.mainWindow.webContents.executeJavaScript(`
+      window.dispatchEvent(new Event('beforeunload', { cancelable: true }))
+    `);
   }
 
   async createWindow() {
@@ -572,105 +493,6 @@ class HexoProDesktop {
   }
 
   // 检查系统依赖
-  async checkSystemDependencies() {
-    const results = {
-      npm: false,
-      hexoCli: false,
-      errors: []
-    };
-
-    // Windows下设置编码环境
-    const execOptions = {};
-    if (process.platform === 'win32') {
-      execOptions.env = {
-        ...process.env,
-        CHCP: '65001',
-        PYTHONIOENCODING: 'utf-8',
-        LC_ALL: 'en_US.UTF-8'
-      };
-      execOptions.encoding = 'utf8';
-    }
-
-    try {
-      console.log('[依赖检查]: 检查 npm...');
-      const npmCommand = process.platform === 'win32' ? 'chcp 65001 >nul 2>&1 && npm --version' : 'npm --version';
-      const npmResult = await execAsync(npmCommand, execOptions);
-      results.npm = true;
-      console.log('[依赖检查]: npm版本:', npmResult.stdout.trim());
-    } catch (error) {
-      console.error('[依赖检查]: npm检查失败:', error.message);
-      results.errors.push('npm未安装或不在PATH中');
-    }
-
-    try {
-      console.log('[依赖检查]: 检查 hexo-cli...');
-      const hexoCommand = process.platform === 'win32' ? 'chcp 65001 >nul 2>&1 && hexo --version' : 'hexo --version';
-      const hexoResult = await execAsync(hexoCommand, execOptions);
-      results.hexoCli = true;
-      console.log('[依赖检查]: hexo-cli版本:', hexoResult.stdout.trim().split('\n')[0]);
-    } catch (error) {
-      console.error('[依赖检查]: hexo-cli检查失败:', error.message);
-      results.errors.push('hexo-cli未安装，请运行 npm install hexo-cli -g 安装');
-    }
-
-    return results;
-  }
-
-  // 执行shell命令并显示进度
-  async executeCommand(command, workingDir, progressCallback) {
-    return new Promise((resolve, reject) => {
-      console.log(`[命令执行]: 在 ${workingDir} 执行: ${command}`);
-
-      const actualCommand = this.wrapWindowsCommand(command);
-      const spawnOptions = {
-        cwd: workingDir,
-        shell: true,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        ...this.getWindowsCommandOptions(),
-        // Windows下额外设置
-        ...(process.platform === 'win32' && {
-          windowsHide: true
-        })
-      };
-
-      const child = spawn(actualCommand, [], spawnOptions);
-
-      let stdout = '';
-      let stderr = '';
-
-      child.stdout.on('data', (data) => {
-        const output = this.processWindowsOutput(data);
-        stdout += output;
-        console.log(`[命令输出]: ${output.trim()}`);
-        if (progressCallback) {
-          progressCallback({ type: 'stdout', data: output });
-        }
-      });
-
-      child.stderr.on('data', (data) => {
-        const output = this.processWindowsOutput(data);
-        stderr += output;
-        console.error(`[命令错误]: ${output.trim()}`);
-        if (progressCallback) {
-          progressCallback({ type: 'stderr', data: output });
-        }
-      });
-
-      child.on('close', (code) => {
-        console.log(`[命令执行]: 命令执行完成，退出码: ${code}`);
-        if (code === 0) {
-          resolve({ stdout, stderr, code });
-        } else {
-          reject(new Error(`命令执行失败，退出码: ${code}\n错误信息: ${stderr}`));
-        }
-      });
-
-      child.on('error', (error) => {
-        console.error(`[命令执行]: 命令执行异常:`, error);
-        reject(error);
-      });
-    });
-  }
 
   createMenu() {
     const isProjectLoading = this.isProjectLoading; // 获取当前加载状态
@@ -825,16 +647,7 @@ class HexoProDesktop {
       const selection = await showProjectSourceDialog(this.mainWindow);
       if (!selection.success) return;
 
-      if (selection.source === 'template') {
-        const dependencies = await this.checkSystemDependencies();
-        if (!dependencies.npm || !dependencies.hexoCli) {
-          await dialog.showMessageBox(this.mainWindow, {
-            type: 'error', title: '缺少必要依赖', message: '新建空白博客需要 npm 和 Hexo CLI',
-            detail: dependencies.errors.join('\n'), buttons: ['知道了']
-          });
-          return;
-        }
-      }
+      getDesktopRuntime().assertReady();
       const result = await dialog.showOpenDialog(this.mainWindow, {
         properties: ['openDirectory', 'createDirectory'], title: '选择新博客项目的父目录'
       });
@@ -1474,6 +1287,10 @@ class HexoProDesktop {
       }
       this.updateLoadingStep(2, true);
 
+      this.updateLoadingStep(3, false);
+      await prepareProject(projectPath, getDesktopRuntime(), output => {
+        console.log('[博客准备]', output.data.trim());
+      });
       this.currentProjectPath = projectPath;
 
       // 步骤3: 启动新服务器
@@ -1765,15 +1582,6 @@ class HexoProDesktop {
       this.createMenu();
       this.setupAutoUpdater();
 
-      // 启动后延迟检查更新，避免影响冷启动体验
-      if (this.isAutoUpdateAvailable()) {
-        setTimeout(() => {
-          this.checkForUpdates(false).catch((error) => {
-            console.error('[Updater]: 启动后自动检查更新失败:', error);
-          });
-        }, 15000);
-      }
-
       // 在macOS上，如果是从隐藏状态恢复，尝试恢复之前的状态
       if (process.platform === 'darwin' && this.windowHidden) {
         const restored = await this.restoreWindowState();
@@ -1865,14 +1673,28 @@ class HexoProDesktop {
       }
     });
 
-    // 在应用退出前清理
-    app.on('before-quit', async (event) => {
-      // 标记应用正在退出，这样close事件就不会阻止退出
+    // Resume the normal quit lifecycle after cleanup so the updater can finish installation.
+    app.on('before-quit', (event) => {
       app.isQuittingApp = true;
-
+      if (this.quitReady) return;
       event.preventDefault();
-      await this.cleanup();
-      app.exit(0);
+      if (!this.quitCleanup) {
+        this.quitCleanup = (async () => {
+          if (!await this.canCloseMainWindow()) {
+            app.isQuittingApp = false;
+            return;
+          }
+          if (this.mainWindow && !this.mainWindow.isDestroyed()) this.mainWindow.setEnabled(false);
+          this.updater?.stop();
+          await this.cleanup();
+          this.quitReady = true;
+          app.quit();
+        })().catch(error => {
+          console.error('[Desktop]: 退出前清理失败:', error);
+          app.isQuittingApp = false;
+          if (this.mainWindow && !this.mainWindow.isDestroyed()) this.mainWindow.setEnabled(true);
+        }).finally(() => { this.quitCleanup = null; });
+      }
     });
 
     // 处理 IPC 消息
@@ -2033,7 +1855,7 @@ class HexoProDesktop {
 
     // 更新检查
     handle('updater-check', async () => {
-      return this.checkForUpdates(true);
+      return this.checkForUpdates();
     });
 
     handle('updater-download', async () => {
@@ -2045,7 +1867,11 @@ class HexoProDesktop {
     });
 
     handle('updater-get-state', () => {
-      return this.updaterState;
+      return this.setupAutoUpdater().state;
+    });
+
+    handle('updater-set-auto-download', (event, enabled) => {
+      return this.setupAutoUpdater().setAutoDownload(enabled);
     });
 
     // 打开外部链接
@@ -2912,16 +2738,23 @@ class HexoProDesktop {
       if (!progressWindow.isDestroyed()) progressWindow.webContents.send('progress-update', { step, log });
     };
     const { importGitHubProject } = require('./github-project');
-    await importGitHubProject(projectPath, selection, { onProgress: step => sendProgress(step) });
+    const runtime = getDesktopRuntime();
+    runtime.assertReady();
+    await importGitHubProject(projectPath, selection, {
+      onProgress: step => sendProgress(step),
+      cloudOptions: {
+        runCommand: async (command, args, options) => {
+          const result = await runtime.run(command, args, options);
+          return result.stdout.trim();
+        }
+      }
+    });
     try {
-      sendProgress('正在安装博客依赖…');
-      const installCommand = await fs.pathExists(path.join(projectPath, 'package-lock.json')) ? 'npm ci' : 'npm install';
-      await this.executeCommand(`${installCommand} --no-audit --no-fund`, projectPath, output => sendProgress(null, output.data.trim()));
-      sendProgress('正在打开导入的博客…');
+      sendProgress('正在准备博客组件并打开博客…');
       await this.loadProject(projectPath);
       if (!progressWindow.isDestroyed()) progressWindow.close();
     } catch (error) {
-      throw new Error(`源码已保留在 ${projectPath}。${error.message}。请完成依赖安装后重新打开博客。`);
+      throw new Error(`源码已保留在 ${projectPath}。${error.message}。请检查网络后重新打开博客。`);
     }
   }
 
@@ -2934,23 +2767,11 @@ class HexoProDesktop {
     };
 
     try {
-      // 步骤1: 初始化Hexo项目
-      sendProgress('正在初始化 Hexo 项目...', `开始初始化项目: ${projectName}`);
-
-      await this.executeCommand(`hexo init ${projectName}`, path.dirname(projectPath), (output) => {
+      sendProgress('正在创建博客…', '准备内置主题和组件');
+      await createProject(projectPath, projectName, getDesktopRuntime(), output => {
         sendProgress(null, output.data.trim(), output.type === 'stderr' ? 'stderr' : 'stdout');
       });
-
-      sendProgress('Hexo 项目初始化完成', 'Hexo 项目结构创建成功');
-
-      // 步骤2: 安装依赖
-      sendProgress('正在安装项目依赖...', '开始安装 npm 依赖');
-
-      await this.executeCommand('npm install', projectPath, (output) => {
-        sendProgress(null, output.data.trim(), output.type === 'stderr' ? 'stderr' : 'stdout');
-      });
-
-      sendProgress('依赖安装完成', 'npm 依赖安装成功');
+      sendProgress('博客已创建', '内置主题和组件已就绪');
 
       // 步骤3: 验证项目
       sendProgress('正在验证项目...', '验证项目结构');
@@ -2989,16 +2810,8 @@ class HexoProDesktop {
     } catch (error) {
       console.error('[创建项目]: 项目创建失败:', error);
 
-      // 清理失败的项目目录
-      try {
-        if (await fs.pathExists(projectPath)) {
-          await fs.remove(projectPath);
-          sendProgress(null, '已清理失败的项目目录', 'info');
-        }
-      } catch (cleanupError) {
-        console.error('[创建项目]: 清理失败的项目目录时出错:', cleanupError);
-      }
-
+      // Template creation cleans only its own staging folder. Keep a completed
+      // project if opening it fails so user content is never removed on retry.
       throw error;
     }
   }
@@ -3121,9 +2934,10 @@ class HexoProDesktop {
           <div class="loading-steps">
             <div class="step active" id="step1">验证项目结构</div>
             <div class="step" id="step2">停止现有服务</div>
-            <div class="step" id="step3">启动项目服务</div>
-            <div class="step" id="step4">加载Web界面</div>
+            <div class="step" id="step3">准备博客组件并启动预览</div>
+            <div class="step" id="step4">打开博客</div>
           </div>
+          <p style="font-size: 12px; color: #777; line-height: 1.6">首次打开已有博客时，应用会自动下载所需组件，请保持网络连接。</p>
         </div>
 
         <script>
